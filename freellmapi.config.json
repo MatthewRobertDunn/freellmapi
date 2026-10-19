@@ -85,6 +85,26 @@
       "contextWindow": 1048576,
       "supportsTools": true,
       "fallbackEnabled": true
+    },
+    {
+      "platform": "openrouter",
+      "modelId": "nvidia/nemotron-3.5-super-vl:free",
+      "displayName": "Nemotron-3.5 Super VL (free)",
+      "enabled": true,
+      "contextWindow": 1000000,
+      "supportsVision": true,
+      "supportsTools": true,
+      "fallbackEnabled": true
+    },
+    {
+      "platform": "nvidia",
+      "modelId": "nvidia/nemotron-3.5-super-vl-120b-a12b",
+      "displayName": "Nemotron-3.5 Super VL 120B (NV)",
+      "enabled": true,
+      "contextWindow": 1000000,
+      "supportsVision": true,
+      "supportsTools": true,
+      "fallbackEnabled": true
     }
   ]
 }
