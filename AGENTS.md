@@ -287,36 +287,15 @@ model).
   `192.168.0.2`), not loopback, so the first-run setup code is required from any
   browser. Find it with
   `journalctl --user-unit freellmapi.service | grep 'setup code' | tail -1`.
+- **OrcaRouter free models are account-gated.** A 429 saying "Free models are
+  not available to this account yet … link a GitHub account" means the key's
+  account isn't entitled yet (new GitHub accounts don't qualify until they age),
+  not a proxy fault. Free routes never fall back to paid models, so a 429 there
+  is a clean quota signal.
 
-## Current NVIDIA NIM additions
+## Current additions
 
-`freellmapi.config.json` declares these under `platform: "nvidia"`:
-
-- `deepseek-ai/deepseek-v4.1-flash`
-- `google/gemma-4-31b-it` (with `"enabled": true`)
-- `meta/muse-glimmer-30b` (already a catalog model — this entry only edits it)
-- `nvidia/nemotron-3-ultra-550b-a55b` (already a catalog model — this entry only edits it)
-- `stepfun-ai/step-5-preview`
-- `z-ai/glm-5.3`
-- `z-ai/glm-5.3-flash`
-
-## Current OrcaRouter additions
-
-Declared under `platform: "orcarouter"` (free `*-free` aliases, $0):
-
-- `z-ai/glm-5.3-flash-free` — ctx 1M, vision
-- `deepseek/deepseek-v4-flash-free` — ctx 1M
-- `deepseek/deepseek-v4.1-flash-free` — ctx 1M, vision
-- `tencent/hy3-free` — ctx 262K
-
-Their ids were verified live against `https://api.orcarouter.ai/v1/models`; the
-provider strips metadata from the `*-free` rows, so context/vision were mirrored
-from the verified paid siblings. These rows merge into the existing unified
-logical entries under unify (e.g. `tencent/hy3-free` → `hunyuan-hy3`); pin the
-provider copy with `orcarouter:<model_id>` (see
-[Pinning one provider's copy of a model](#pinning-one-providers-copy-of-a-model)).
-
-Note: OrcaRouter gates free models behind an account-age check — a 429 saying
-"Free models are not available to this account yet … link a GitHub account"
-means the key's account isn't entitled yet, not a proxy fault. Free routes never
-fall back to paid models, so a 429 is a clean quota signal.
+The authoritative list of models this install adds or edits — their platforms,
+ids, and metadata — is `freellmapi.config.json` (the `models` array). Read that
+file rather than a snapshot here; it is the source of truth and this document is
+not kept in sync with it.

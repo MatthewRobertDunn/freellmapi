@@ -76,6 +76,15 @@
       "contextWindow": 262144,
       "supportsTools": true,
       "fallbackEnabled": true
+    },
+    {
+      "platform": "kilo",
+      "modelId": "reflection/beam-free",
+      "displayName": "Reflection Beam 1.0 (Kilo)",
+      "enabled": true,
+      "contextWindow": 1048576,
+      "supportsTools": true,
+      "fallbackEnabled": true
     }
   ]
 }
