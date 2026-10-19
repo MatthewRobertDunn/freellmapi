@@ -23,5 +23,9 @@ server/data/
 deploy-pi.sh
 update-hermes.sh
 
+# Local dashboard/API credentials for this install (email, password, tokens)
+CREDENTIALS.local.md
+*.local.md
+
 # Monetization planning — private, never committed
 monetization/

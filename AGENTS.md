@@ -29,6 +29,22 @@ startup config**, which is how this install manages its model list.
 
 That is the whole loop. There is no hot reload; the config is read once per boot.
 
+## Dashboard / API credentials
+
+Local-only credentials (dashboard email/password, a session token, and the proxy
+key) live in **`CREDENTIALS.local.md`** — it is **gitignored** (`*.local.md`), so
+it never lands in a commit. Read it for the current values and for copy-paste
+recipes: logging in to mint a dashboard bearer token, calling `/api/models`
+(list / add / edit / **test** / delete), and testing inference through `/v1`
+including a forced tool-call check.
+
+Two credentials, don't mix them up:
+
+- **Dashboard session token** → `Authorization: Bearer <token>` (or
+  `x-dashboard-token:`) authorizes **`/api/*`** (models, keys, fallback, …).
+  Mint it via `POST /api/auth/login`; it can expire.
+- **Proxy key** (`freellmapi-…`) authorizes **`/v1/*`** only — never `/api/*`.
+
 ## How the declarative config is wired
 
 `server/src/index.ts` calls `applyDeclarativeConfigFromEnv()` in `main()`,
