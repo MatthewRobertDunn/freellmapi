@@ -42,6 +42,40 @@
       "modelId": "z-ai/glm-5.3-flash",
       "displayName": "GLM 5.3 Flash (NV)",
       "fallbackEnabled": true
+    },
+    {
+      "platform": "orcarouter",
+      "modelId": "z-ai/glm-5.3-flash-free",
+      "displayName": "GLM 5.3 Flash (OrcaFree)",
+      "contextWindow": 1000000,
+      "supportsVision": true,
+      "supportsTools": true,
+      "fallbackEnabled": true
+    },
+    {
+      "platform": "orcarouter",
+      "modelId": "deepseek/deepseek-v4-flash-free",
+      "displayName": "DeepSeek V4 Flash (OrcaFree)",
+      "contextWindow": 1048576,
+      "supportsTools": true,
+      "fallbackEnabled": true
+    },
+    {
+      "platform": "orcarouter",
+      "modelId": "deepseek/deepseek-v4.1-flash-free",
+      "displayName": "DeepSeek V4.1 Flash (OrcaFree)",
+      "contextWindow": 1048576,
+      "supportsVision": true,
+      "supportsTools": true,
+      "fallbackEnabled": true
+    },
+    {
+      "platform": "orcarouter",
+      "modelId": "tencent/hy3-free",
+      "displayName": "Hunyuan Hy3 (OrcaFree)",
+      "contextWindow": 262144,
+      "supportsTools": true,
+      "fallbackEnabled": true
     }
   ]
 }

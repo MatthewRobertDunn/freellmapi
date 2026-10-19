@@ -136,6 +136,29 @@ To control order, use the top-level `fallback` and `routing` keys:
 `priority` defaults to the array index. `strategy` is one of `priority`,
 `balanced`, `smartest`, `fastest`, `reliable`, `custom`.
 
+## Pinning one provider's copy of a model
+
+With unify ON, one logical name (e.g. `glm-5.3-flash`) can cover several
+providers' rows, and a bare `id` in a request resolves to the whole group — the
+router then picks the best available member and may fail over to another
+provider. To target **one** provider's copy (no failover to the rest of the
+group), send the model as:
+
+```
+platform:model_id
+```
+
+For example, `orcarouter:z-ai/glm-5.3-flash-free` forces the OrcaRouter row even
+though NVIDIA also serves a `z-ai/glm-5.3-flash` copy that the bare
+`z-ai/glm-5.3-flash-free` name can otherwise resolve to. `memberId(row)` is
+`` `${row.platform}:${row.model_id}` `` (`server/src/services/model-groups.ts`,
+`resolveRequestedIdToTieredMembers`); this exact match is checked before the bare
+`model_id` scan, so a platform prefix always wins. Note the separator is a
+**colon** — `orcarouter/...` (slash) is treated as a literal model id and 404s.
+
+This works only when unify is enabled. For `custom` relays that share a model id,
+append an endpoint instead: `custom:model_id#<endpoint-handle-or-url>`.
+
 ## Providers that need a key
 
 Adding a model does **not** add credentials. NVIDIA NIM (and most providers)
@@ -270,8 +293,30 @@ model).
 `freellmapi.config.json` declares these under `platform: "nvidia"`:
 
 - `deepseek-ai/deepseek-v4.1-flash`
+- `google/gemma-4-31b-it` (with `"enabled": true`)
 - `meta/muse-glimmer-30b` (already a catalog model — this entry only edits it)
 - `nvidia/nemotron-3-ultra-550b-a55b` (already a catalog model — this entry only edits it)
 - `stepfun-ai/step-5-preview`
 - `z-ai/glm-5.3`
 - `z-ai/glm-5.3-flash`
+
+## Current OrcaRouter additions
+
+Declared under `platform: "orcarouter"` (free `*-free` aliases, $0):
+
+- `z-ai/glm-5.3-flash-free` — ctx 1M, vision
+- `deepseek/deepseek-v4-flash-free` — ctx 1M
+- `deepseek/deepseek-v4.1-flash-free` — ctx 1M, vision
+- `tencent/hy3-free` — ctx 262K
+
+Their ids were verified live against `https://api.orcarouter.ai/v1/models`; the
+provider strips metadata from the `*-free` rows, so context/vision were mirrored
+from the verified paid siblings. These rows merge into the existing unified
+logical entries under unify (e.g. `tencent/hy3-free` → `hunyuan-hy3`); pin the
+provider copy with `orcarouter:<model_id>` (see
+[Pinning one provider's copy of a model](#pinning-one-providers-copy-of-a-model)).
+
+Note: OrcaRouter gates free models behind an account-age check — a 429 saying
+"Free models are not available to this account yet … link a GitHub account"
+means the key's account isn't entitled yet, not a proxy fault. Free routes never
+fall back to paid models, so a 429 is a clean quota signal.
