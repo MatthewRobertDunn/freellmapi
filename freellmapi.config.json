@@ -2,6 +2,13 @@
   "models": [
     {
       "platform": "nvidia",
+      "modelId": "google/gemma-4-31b-it",
+      "displayName": "Gemma 4 31B (NV)",
+      "enabled": true,
+      "fallbackEnabled": true
+    },
+    {
+      "platform": "nvidia",
       "modelId": "deepseek-ai/deepseek-v4.1-flash",
       "displayName": "DeepSeek V4.1 Flash (NV)",
       "fallbackEnabled": true

@@ -187,7 +187,72 @@ under `customProviders` (with `baseUrl`, optional `apiKey`, `label`, and its
 `"platform": "custom"`. When two endpoints serve the same model id, add
 `"endpoint"` (the URL or its short handle) so the entry is unambiguous.
 
+## Deleting a model
+
+Deleting a model removes the row **and writes a tombstone**, so the next catalog
+sync cannot resurrect it. This is different from disabling:
+
+| Action | `/v1/models` | Routing |
+|---|---|---|
+| Disable (`enabled: false`) | Still listed, tagged `available: false` | Stopped |
+| Delete | **Gone from the list** | Gone |
+
+Do NOT delete by writing to the DB by hand — bypassing the API skips the
+tombstone and cleanup side effects; the row would simply return on the next
+catalog sync. Instead:
+
+1. **Get a dashboard token.** The proxy key (`freellmapi-…`) only authorizes
+   `/v1/*`; the dashboard/admin API needs a session token from browser login.
+2. **Find the row's integer id** (one row per provider per model — a model served
+   by three relays has three rows; deleting one leaves the others):
+
+   ```bash
+   curl -s -H "Authorization: Bearer <dashboard token>" \
+     http://192.168.0.2:3001/api/models | \
+     node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{for(const r of JSON.parse(d)) console.log(r.id, r.platform, r.modelId)})'
+   ```
+
+3. **Delete by id** (also use it per-id for every provider copy you want gone):
+
+   ```bash
+   curl -s -X DELETE -H "Authorization: Bearer <dashboard token>" \
+     http://192.168.0.2:3001/api/models/<id>
+   # → {"success":true,...}; a second call returns 404 once the row is gone
+   ```
+
+4. **Verify:**
+
+   ```bash
+   curl -s -H "Authorization: Bearer <dashboard token>" http://192.168.0.2:3001/api/models | \
+     node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const j=JSON.parse(d);console.log("left:",(Array.isArray(j)?j:[]).length)})'
+   node -e 'const D=require("better-sqlite3");
+   const db=new D("server/data/freeapi.db",{readonly:true});
+   console.table(db.prepare("SELECT kind,platform,model_id,source FROM catalog_model_tombstones ORDER BY created_at DESC LIMIT 5").all());'
+   ```
+
+Deletion inside the route (`server/src/routes/models.ts`, `modelsRouter.delete('/:id')`)
+records a `catalog_model_tombstones` row with `source='user'`, clears
+`profile_models`/`fallback_config` entries, and deletes the `models` row in one
+transaction. For custom-relay models (`platform='custom'`) it also runs
+`deleteUnusedCustomEndpointKey`. Upstream EOL retirements use
+`source='upstream_eol'` instead and keep the row disabled; those can be
+reinstated by a later catalog, a user tombstone cannot (only by re-adding the
+model).
+
 ## Gotchas
+
+- **Deleting a unified-group member affects the group.** With unify ON,
+  `/v1/models` shows one entry per logical model; deleting a member row drops
+  that provider copy (merge membership, fallback and profile state) but not the
+  other providers' rows.
+- **Deletions survive restarts and catalog syncs** — a deleted model has a
+  `source='user'` tombstone that catalog sync honors permanently. The only thing
+  that clears the tombstone is *declaring the model again* in
+  `freellmapi.config.json` (`declarative-config.ts`, `upsertModel()` — a
+  declaration is treated as operator intent to restore). So on restart, only
+  models actually declared in the config reappear; never delete a model that is
+  still declared there without first removing its declarative entry. (The file
+  cannot be used to delete; it only adds or edits.)
 
 - **`ENCRYPTION_KEY` must stay stable.** Provider keys are encrypted at rest with
   it; changing it breaks every stored secret. It lives in `.env` (mode `600`).
