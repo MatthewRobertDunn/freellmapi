@@ -72,10 +72,10 @@ export type Platform =
   | 'aclide'
   // OpenAI-compatible chat and embeddings; one shared $1 monthly allowance.
   | 'speka'
-  // Built-in chat and embeddings share free monthly credits; catalog only.
-  | 'auray'
   // Decision-only JEV adapter; promotional availability is catalog-managed.
   | 'beatapi'
+  // Free-category chat and decisions share one weighted daily allowance.
+  | 'apinex'
   // Ongoing free research API for chat and speech recognition; catalog only.
   | 'typhoon'
   // Permanent free chat aliases, shared fair-use quota; signed catalog only.
@@ -366,6 +366,10 @@ export interface ApiKey {
   exportable: boolean;
   createdAt: string;
   lastCheckedAt: string | null;
+  /** Last time the key was proven to work — a valid probe verdict or a served
+   *  live request (#1493). Unlike lastCheckedAt, a transport error does not
+   *  refresh it, so "checked recently but never worked" is visible. */
+  lastHealthyAt?: string | null;
   lastHealthError: string | null;
   /** Model ids this key is limited to; null = serves every model of its
    *  platform (#657). */

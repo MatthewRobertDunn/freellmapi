@@ -4,7 +4,7 @@ import type { Request, Response } from 'express';
 import { z } from 'zod';
 import type { ChatMessage, ChatToolCall, TokenUsage } from '@freellmapi/shared/types.js';
 import { type RouteResult, type ResolvedChain, type ChainRow, routeRequest, resolveRoutingChain, resolveModelGroupCandidates, resolveStickyPreference, hasEnabledVisionModel, hasEnabledToolsModel, routingReserveTokens, failureAttributionFor } from '../services/router.js';
-import { secondsUntilNextMonth } from '../services/key-budget.js';
+import { secondsUntilNextMonth, nextMonthResetAt } from '../services/key-budget.js';
 import { runEmbeddings, EmbeddingsError } from '../services/embeddings.js';
 import { runRerank, RerankError, rerankRetryAfterSec } from '../services/rerank.js';
 import { runSearch, SearchError, searchRetryAfterSec, listSearchEngines } from '../services/search.js';
@@ -38,8 +38,9 @@ import type { Platform } from '@freellmapi/shared/types.js';
 import { inferQuotaPoolKey, type QuotaObservationContext } from '../services/provider-quota.js';
 import { isUnifyEnabled, getModelGroups, resolveRequestedIdForDispatch } from '../services/model-groups.js';
 import { buildModelListing, type NormalizedModel } from '../services/model-listing.js';
-import { claudeFamilyDiscoveryEntries } from '../services/anthropic-map.js';
+import { claudeFamilyDiscoveryEntries, resolveListedClaudeAlias } from '../services/anthropic-map.js';
 import { compressRequest, formatCompressionHeader } from '../services/compression/pipeline.js';
+import { applyDecisionRouting, routingStrategyHeader } from '../services/routing-decision.js';
 
 export const proxyRouter = Router();
 
@@ -467,6 +468,60 @@ proxyRouter.get('/models', (req: Request, res: Response) => {
         supported_parameters: supportedParametersForPlatforms(m.platforms, { tools: m.supportsTools }),
       })),
     ],
+  });
+});
+
+
+// GET /v1/usage — self-service consumption for inference clients (#1568).
+//
+// OpenRouter exposes GET /api/v1/auth/key (usage + limits for the calling key)
+// and LiteLLM exposes /key/info; every agent user who wonders "what happened
+// to my 120M tokens" currently has to open the dashboard to find out. This
+// puts the same answer behind the key that spent the tokens: one month-to-date
+// roll-up of successful proxied requests, split by provider platform, plus
+// when the window resets.
+//
+// Reads the durable key_monthly_usage ledger (the per-key monthly-cap source),
+// NOT the analytics table, so retention pruning can never make the answer
+// disagree with what the caps enforce. Aggregated per PROVIDER key joined to
+// api_keys for the platform label; requests whose key was deleted have already
+// dropped out of the ledger's join and are reported under "removed".
+//
+// The ledger is install-wide (requests are not tagged with the client profile
+// that sent them), so only the unified key may read it. A client-profile key
+// (sk-cp-...) is handed to a downstream client and must not see what every
+// other client spent.
+proxyRouter.get('/usage', (req: Request, res: Response) => {
+  const auth = requireInferenceAuth(req, res);
+  if (!auth) return;
+  if (auth.kind !== 'unified') {
+    res.status(403).json({ error: { message: 'Usage is only available to the unified API key', type: 'permission_error' } });
+    return;
+  }
+
+  const month = new Date().toISOString().slice(0, 7);
+  const db = getDb();
+  const totals = db.prepare(`
+    SELECT COALESCE(SUM(requests), 0) AS requests, COALESCE(SUM(tokens), 0) AS tokens
+    FROM key_monthly_usage WHERE month = ?
+  `).get(month) as { requests: number; tokens: number };
+  const byPlatform = db.prepare(`
+    SELECT COALESCE(k.platform, 'removed') AS platform,
+           SUM(u.requests) AS requests, SUM(u.tokens) AS tokens
+    FROM key_monthly_usage u
+    LEFT JOIN api_keys k ON k.id = u.key_id
+    WHERE u.month = ?
+    GROUP BY COALESCE(k.platform, 'removed')
+    ORDER BY tokens DESC, requests DESC
+  `).all(month) as { platform: string; requests: number; tokens: number }[];
+
+  res.json({
+    object: 'usage',
+    month,
+    resetsAt: nextMonthResetAt(),
+    requests: totals.requests,
+    tokens: totals.tokens,
+    byPlatform,
   });
 });
 
@@ -1249,8 +1304,12 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
     return;
   }
 
-  const { model: requestedModel, prompt, suffix, temperature, top_p, stream } = parsed.data;
-  const requestedModelLabel = requestedModel ?? 'auto';
+  const { model: clientModel, prompt, suffix, temperature, top_p, stream } = parsed.data;
+  const requestedModelLabel = clientModel ?? 'auto';
+  // Claude alias from GET /v1/models → the Claude family map, as on /v1/chat/completions.
+  const claudeAlias = resolveListedClaudeAlias(clientModel);
+  const requestedModel = claudeAlias?.kind === 'model' ? claudeAlias.modelId : claudeAlias ? 'auto' : clientModel;
+  const aliasTierChain = claudeAlias?.kind === 'tier' ? resolveModelGroupCandidates(claudeAlias.dbIds) : [];
   const max_tokens = parsed.data.max_tokens != null && parsed.data.max_tokens > 0
     ? parsed.data.max_tokens : 128;
   const stop = providerSafeStop(parsed.data.stop);
@@ -1282,9 +1341,9 @@ proxyRouter.post('/completions', async (req: Request, res: Response) => {
   }
 
   let preferredModel: number | undefined;
-  let groupChain: ChainRow[] | undefined;
+  let groupChain: ChainRow[] | undefined = aliasTierChain.length > 0 ? aliasTierChain : undefined;
 
-  if (!isAutoModel(requestedModel) && requestedModel) {
+  if (!groupChain && !isAutoModel(requestedModel) && requestedModel) {
     const db = getDb();
     const resolved = isUnifyEnabled() ? resolveRequestedIdForDispatch(requestedModel, getModelGroups()) : null;
     const members = resolved?.memberDbIds ?? null;
@@ -1674,8 +1733,13 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     return;
   }
 
-  const { model: requestedModel, temperature, top_p, stream } = parsed.data;
-  const requestedModelLabel = requestedModel ?? 'auto';
+  const { model: clientModel, temperature, top_p, stream } = parsed.data;
+  const requestedModelLabel = clientModel ?? 'auto';
+  // A Claude alias from GET /v1/models routes through the Claude family map
+  // (a pinned model, auto, or a tier pool), the same as on /v1/messages.
+  const claudeAlias = resolveListedClaudeAlias(clientModel);
+  const requestedModel = claudeAlias?.kind === 'model' ? claudeAlias.modelId : claudeAlias ? 'auto' : clientModel;
+  const aliasTierChain = claudeAlias?.kind === 'tier' ? resolveModelGroupCandidates(claudeAlias.dbIds) : [];
   // Agent-tolerant knob normalization (#200): max_tokens <= 0 means "no
   // limit" in several clients → unset; tool_choice 'any' is OpenAI's
   // 'required'; tool definitions get their 'function' type re-defaulted.
@@ -2203,7 +2267,14 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   // successful provider without leaking stickiness across groups.
   let stickyStrategyKey: string | undefined = strategyKey;
 
-  if (isAutoModel(requestedModel)) {
+  if (aliasTierChain.length > 0) {
+    // A tier-mapped Claude alias routes STRICTLY over its tier's pool. An
+    // empty tier falls through to plain auto, as on /v1/messages.
+    groupChain = aliasTierChain;
+    stickyStrategyKey = `tier:${aliasTierChain[0]!.model_db_id}`;
+    const sticky = getStickyModel(messages, sessionIdHeader, stickyStrategyKey);
+    preferredModel = (sticky != null && groupChain.some(r => r.model_db_id === sticky)) ? sticky : undefined;
+  } else if (isAutoModel(requestedModel)) {
     preferredModel = resolveStickyPreference(getStickyModel(messages, sessionIdHeader, strategyKey), resolvedChain?.chain);
   } else if (requestedModel) {
     const db = getDb();
@@ -2290,6 +2361,13 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   // when the wall-clock retry budget expires mid-attempt, canceling the
   // in-flight upstream instead of waiting for a stalled attempt to time out.
   const hedgeAbort = new AbortController();
+
+  // Decision routing (#1354): with the 'decision' strategy on, a decision
+  // model picks which preset (Smartest / Fastest / Balanced / Most reliable)
+  // this turn routes with. Skipped when the client pinned a model or the
+  // conversation is sticky to one. Any doubt routes as Balanced.
+  const routingPick = await applyDecisionRouting(messages, { pinned: pinnedModelId != null || preferredModel != null, preset: resolvedChain?.strategyOverride, signal: clientAbort.signal });
+  if (routingPick && !res.headersSent) res.setHeader('X-FreeLLM-Routing-Strategy', routingStrategyHeader(routingPick));
 
   await runFallbackLoop({
     maxRetries: MAX_RETRIES,

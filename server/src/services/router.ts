@@ -16,7 +16,7 @@ import {
   modelWindowUsedFraction,
 } from './ratelimit.js';
 import {
-  BANDIT_PRESETS, DEFAULT_STRATEGY, type RoutingStrategy, type RoutingWeights,
+  BANDIT_PRESETS, DEFAULT_STRATEGY, type PresetStrategy, type RoutingStrategy, type RoutingWeights,
   type KeySelectionStrategy,
   reliabilityPosterior, expectedReliability, sampleBeta,
   speedScore, intelligenceScore, intelligenceComposite, headroomFactor, rateWindowHeadroomFactor,
@@ -35,6 +35,7 @@ import { platformDropsResponseFormat } from '../lib/sampling-params.js';
 import { passesContextWindowFloor } from '../lib/min-context-window.js';
 import { isUnifyEnabled, getModelGroups, resolveRequestedIdForDispatch } from './model-groups.js';
 import { getActiveProfileId } from './profile-models.js';
+import { getClientContext } from '../lib/client-context.js';
 import { customEndpointKeyIds } from './custom-endpoint.js';
 import { isDegraded } from './degradation.js';
 import { modelStatsKey, endpointScopeForBaseUrl } from '../lib/endpoint-scope.js';
@@ -509,7 +510,7 @@ export const EXPLORE_CHANCE = 0.1;
 /** A model counts as "has data" once its decay-weighted success+failure
  *  pseudo-count reaches this many samples. */
 export const EXPLORE_MIN_SAMPLES = 5;
-const VALID_STRATEGIES: RoutingStrategy[] = ['priority', 'balanced', 'smartest', 'fastest', 'reliable', 'custom'];
+const VALID_STRATEGIES: RoutingStrategy[] = ['priority', 'balanced', 'smartest', 'fastest', 'reliable', 'custom', 'decision'];
 
 export function getRoutingStrategy(): RoutingStrategy {
   const raw = getSetting(STRATEGY_KEY);
@@ -751,7 +752,19 @@ export function setCommunityPriors(priors: CommunityPriorMap): number {
 function weightsWithPeak(strategy: RoutingStrategy): { weights: RoutingWeights | null; adjusted: boolean } {
   if (strategy === 'priority') return { weights: null, adjusted: false };
   if (strategy === 'custom') return { weights: getCustomWeights(), adjusted: false };
+  // 'decision' outside a picked request (display, fusion, background) scores
+  // as Balanced, the same preset an unsure or unavailable decision falls to.
+  if (strategy === 'decision') return weightsWithPeak('balanced');
   return peakAdjustedWeights(BANDIT_PRESETS[strategy], strategy, getPeakHoursConfig());
+}
+
+/** The strategy THIS request routes with. Under 'decision' (#1354) that is the
+ *  preset the decision model picked for the request, else Balanced; every
+ *  other strategy is used as set. */
+export function effectiveRoutingStrategy(): RoutingStrategy {
+  const strategy = getRoutingStrategy();
+  if (strategy !== 'decision') return strategy;
+  return getClientContext().routingStrategy ?? 'balanced';
 }
 
 function weightsFor(strategy: RoutingStrategy): RoutingWeights | null {
@@ -1267,7 +1280,7 @@ export interface ResolvedChain {
    *  ordering away (#1628) — callers must pass this through so the request is
    *  scored under the axis the client asked for. Absent for plain `auto` and
    *  `auto:<chain-name>`, where the operator's global strategy is what governs. */
-  strategyOverride?: RoutingStrategy;
+  strategyOverride?: PresetStrategy;
 }
 
 const GLOBAL_SORT_ALIASES: Record<string, string> = {
@@ -1283,7 +1296,7 @@ const GLOBAL_SORT_ALIASES: Record<string, string> = {
  *  order the alias resolves to and the order routeRequest re-sorts with can
  *  never drift apart. `auto:cheap` is budget-leaning but keeps the balanced
  *  blend — everything in this pool is already free (see the API docs). */
-const GLOBAL_AXIS_STRATEGY: Record<string, RoutingStrategy> = {
+const GLOBAL_AXIS_STRATEGY: Record<string, PresetStrategy> = {
   smart: 'smartest',
   fast: 'fastest',
   cheap: 'balanced',
@@ -1936,7 +1949,7 @@ export function resolveModelGroupCandidates(
   demotedDbIds?: ReadonlySet<number>,
 ): ChainRow[] {
   const db = getDb();
-  const strategy = getRoutingStrategy();
+  const strategy = effectiveRoutingStrategy();
   if (strategy !== 'priority') refreshStatsCache(db);
 
   const activeProfileId = getActiveProfileId(db);
@@ -1995,7 +2008,13 @@ export interface FusionCandidate {
  */
 export function getOrderedFusionChain(estimatedTokens: number, exactOutputReserve = 0): FusionCandidate[] {
   const db = getDb();
-  const strategy = getRoutingStrategy();
+  // effectiveRoutingStrategy, not getRoutingStrategy (#1354): under the
+  // 'decision' strategy the fusion panel must draw from the same per-request
+  // ordering the auto-router just used for the chat half of the request. The
+  // raw setting value scores every decision-strategy request as plain Balanced,
+  // so a request the decision model routed 'smartest' got its chat answer from
+  // the big model and its panel slots auto-picked from the Balanced order.
+  const strategy = effectiveRoutingStrategy();
   if (strategy !== 'priority') refreshStatsCache(db);
   const chain = getActiveChain(db).filter(e => e.enabled);
 
@@ -2159,13 +2178,15 @@ export function resolveFusionCandidate(modelId: string): FusionCandidate | null 
  *   global one. Set by the `auto:<axis>` aliases (ResolvedChain.strategyOverride,
  *   #1628); leave unset everywhere else.
  */
-export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, preferredModelDbId?: number, requireVision = false, requireTools = false, skipModels?: Set<number>, prefetchedChain?: ChainRow[], requireStructured = false, skipPlatforms?: Set<string>, exactOutputReserve = 0, task?: 'code' | 'chat', strategyOverride?: RoutingStrategy): RouteResult {
+export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, preferredModelDbId?: number, requireVision = false, requireTools = false, skipModels?: Set<number>, prefetchedChain?: ChainRow[], requireStructured = false, skipPlatforms?: Set<string>, exactOutputReserve = 0, task?: 'code' | 'chat', strategyOverride?: PresetStrategy): RouteResult {
   const db = getDb();
 
   // The alias's axis wins for this request (#1628): scoring the prefetched
   // chain under the global strategy silently discarded what `auto:smart` /
-  // `auto:fast` asked for. Absent an override the global strategy governs.
-  const strategy = strategyOverride ?? getRoutingStrategy();
+  // `auto:fast` asked for. Absent an override, whatever this request routes
+  // with governs — the operator's setting, or the preset the 'decision' model
+  // picked (#1354).
+  const strategy = strategyOverride ?? effectiveRoutingStrategy();
   if (strategy !== 'priority') refreshStatsCache(db);
 
   const chain = (prefetchedChain ?? getActiveChain(db)).filter(e => e.enabled);

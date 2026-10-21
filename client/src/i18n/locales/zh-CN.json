@@ -349,7 +349,23 @@
     "weightSpeed": "速度",
     "weightIntelligence": "智能",
     "weightRequired": "至少一个权重必须大于零。",
-    "scoreColumn": "评分"
+    "scoreColumn": "评分",
+    "decision": "Decision",
+    "decisionBlurb": "A decision model reads each request and picks Smartest, Fastest, Balanced or Most reliable for it. When it is unsure, slow or unavailable, the request routes as Balanced. Needs a Cloudflare or OpenRouter key.",
+    "decisionSettings": "Decision routing",
+    "decisionSettingsHelp": "For each request, a decision model picks the strategy that fits it best. Requests that pin a model are never asked about.",
+    "decisionNotReady": "No decision model is ready, so every request routes as Balanced. Add a Cloudflare or OpenRouter key and turn on a model under Models → Decision.",
+    "decisionModel": "Decision model",
+    "decisionModelAuto": "Auto (first available)",
+    "decisionMinConfidence": "Minimum confidence",
+    "decisionMinConfidenceHelp": "Below this, the request routes as Balanced.",
+    "decisionPicks": "Picks since restart ({total})",
+    "decisionFallbacks": "{count} routed as Balanced (unsure, slow or unavailable)",
+    "decisionSetupTitle": "Add a free key to use Decision",
+    "decisionSetupHelp": "Decision routing asks a free decision model which strategy fits each request. It needs a key for one of these providers. Both have a free tier, no card needed.",
+    "decisionAddKey": "Add {provider} key",
+    "decisionNoModels": "No decision model is turned on yet. Turn one on under Models → Decision.",
+    "decisionOpenModels": "Open decision models"
   },
   "penaltyInspector": {
     "title": "路由压力",
@@ -540,6 +556,8 @@
     "providerActions": "提供方操作",
     "routeViaProxy": "经由代理服务器转发",
     "checkNow": "立即检查",
+    "lastWorkedHint": "上次可用：{when}",
+    "lastWorkedNever": "尚未处理请求，也尚未通过检查",
     "noAutoCheckHint": "该提供商不允许自动检查密钥。密钥在处理完第一个请求后会变为正常。",
     "noModelsYetHint": "你的目录中还没有该提供商的模型，因此暂时没有可处理的请求。",
     "proxyEnvHintBefore": "也可通过 ",
@@ -1166,7 +1184,8 @@
       "openclaw": "一个常驻运行的个人助理，在你自己的机器上通过 WhatsApp、Telegram、Discord 等应答。",
       "hermes": "Nous Research 的自我改进智能体，拥有持久记忆和技能，可在终端或聊天应用中使用。",
       "pi": "一个极简的终端智能体，用你自己的扩展、技能和提示词模板来塑造它。",
-      "reasonix": "为 DeepSeek 原生打造的终端编程智能体，围绕前缀缓存设计，长会话也能保持低成本。"
+      "reasonix": "为 DeepSeek 原生打造的终端编程智能体，围绕前缀缓存设计，长会话也能保持低成本。",
+      "zcode": "Z.ai 为其 GLM 模型打造的编程智能体，可通过提供方注册表连接任意 OpenAI 兼容端点。"
     }
   },
   "update": {
