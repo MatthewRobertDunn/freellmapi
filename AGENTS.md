@@ -218,6 +218,46 @@ A healthy apply logs something like:
 Per-entry problems are reported as warnings and **skipped**, not fatal — read the
 count and the `entries skipped` suffix, and grep for `[config]` warnings.
 
+## Testing NIM directly (backend, no router)
+
+Sometimes you want to test the NVIDIA NIM backend itself, bypassing the router.
+The NIM key (`nvapi-…`) lives in `CREDENTIALS.local.md` (gitignored) along with
+the dashboard/proxy credentials. The backend base URL is
+`https://integrate.api.nvidia.com/v1/` (the same OpenAI-compatible API the
+`nvidia` provider wraps).
+
+Quick chat test (grab the key from `CREDENTIALS.local.md`; never hardcode it
+into committed files):
+
+```bash
+export NIM_API_KEY='<nvapi key from CREDENTIALS.local.md>'
+curl -s https://integrate.api.nvidia.com/v1/chat/completions \
+  -H "Authorization: Bearer $NIM_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"minimaxai/minimax-m3.1-flash","messages":[{"role":"user","content":"ping"}],"max_tokens":16}'
+```
+
+### Measuring a model's real context length
+
+`scripts/probe-context-length.mjs` binary-searches token counts until the
+provider rejects with a context-length error. It reads the true token count
+from `usage.prompt_tokens`, parses NVIDIA's exact limit out of the error body
+(`details.limit`), and backs off on 429s (throttling is not a context failure):
+
+```bash
+NIM_API_KEY=$NIM_API_KEY node scripts/probe-context-length.mjs minimaxai/minimax-m3.1-flash
+# options: --base <url> --max-tokens 16 --hi <upper-bound-guess> --tries 16 --timeout 120000
+# usage for repetition: `curl -s -H "Authorization: Bearer $NIM_API_KEY" ...`
+```
+
+It prints the provider-stated limit (authoritative when given), the largest
+measured `usage.prompt_tokens` success, and the full probe trail. NIM's
+context errors look like
+`{"details":{"type":"context_length","limit":262144,"actual":315564}}` — the
+limit counts input **and** output tokens together. Verified 2026-10-24:
+`minimaxai/minimax-m3.1-flash` really does serve up to 262144 (largest measured
+success was ~201.8k input tokens + 16 output; throttle your probe pace — the
+account hits token-per-minute 429s quickly at these sizes).
+
 ## Custom (non-catalog) endpoints
 
 For an OpenAI-compatible endpoint that is not a registered provider, declare it
