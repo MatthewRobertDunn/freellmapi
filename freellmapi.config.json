@@ -11,6 +11,7 @@
       "platform": "nvidia",
       "modelId": "deepseek-ai/deepseek-v4.1-flash",
       "displayName": "DeepSeek V4.1 Flash (NV)",
+      "contextWindow": 1048576,
       "fallbackEnabled": true
     },
     {
@@ -101,7 +102,18 @@
       "modelId": "nvidia/nemotron-3.5-super-vl-120b-a12b",
       "displayName": "Nemotron-3.5 Super VL (NV)",
       "enabled": true,
-      "contextWindow": 1000000,
+      "contextWindow": 262144,
+      "supportsVision": true,
+      "supportsTools": true,
+      "fallbackEnabled": true
+    },
+    {
+      "platform": "nvidia",
+      "modelId": "minimaxai/minimax-m3.1-flash",
+      "displayName": "MiniMax M3.1 Flash (NV)",
+      "intelligenceRank": 50,
+      "sizeLabel": "Frontier",
+      "contextWindow": 262144,
       "supportsVision": true,
       "supportsTools": true,
       "fallbackEnabled": true
