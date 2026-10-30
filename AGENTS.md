@@ -236,6 +236,56 @@ curl -s https://integrate.api.nvidia.com/v1/chat/completions \
   -d '{"model":"minimaxai/minimax-m3.1-flash","messages":[{"role":"user","content":"ping"}],"max_tokens":16}'
 ```
 
+### Context length: verify the build.nvidia.com page spec with one probe
+
+When adding a NIM model, **always set `contextWindow`** — don't leave it unset.
+The cheap way to get a first value (and `supportsTools` / `supportsVision`
+too) is to fetch the model's page on build.nvidia.com, e.g.
+
+```
+https://build.nvidia.com/mistralai/mistral-large-4-1t-a52b
+```
+
+The page fetches as Markdown and ends with a **Specifications** block plus a
+**Capabilities** block, e.g. `**Context Length:** 262,144 tokens`,
+`Function Calling: Supported`.
+
+- **Trust order (empirical, learn the hard way once):**
+  1. `details.limit` in a context-length **error body** — the serving stack's
+     own enforcement value; right in every case so far. A rejected request
+     fails at validation *before prefill*, so provoking the error costs
+     essentially nothing beyond building the payload.
+  2. The page's **Specifications** section — usually right, but has been wrong
+     once (see exception below).
+  3. The card **prose** — marketing. Sometimes right, never authoritative.
+
+So don't *assume* the page — **verify it with one probe**, because verifying
+is cheaper than being wrong:
+
+```bash
+NIM_API_KEY=$NIM_API_KEY node scripts/probe-context-length.mjs <modelId>
+```
+
+- The default first probe (~500k real tokens) lands above most NIM limits,
+  instantly 400s with `details.limit=<L>`, and the script stops — **one
+  request** yields the server-enforced limit.
+- `L == page spec` → page value verified, done. `L != page spec` → page was
+  wrong; use `L`. (Page specs give `supportsTools`/`supportsVision` too; those
+  aren't probe-able this way, take them from the page.)
+- If the first probe is *accepted* instead, the real context exceeds the
+  guess — the script keeps doubling until it errors.
+- **`--confirm`**: use when you will actually rely on the number (e.g. a 1M
+  window feeding routing). After the verdict it sends one *accepted* request
+  at 0.97×L — the refusal alone never proves the boundary is served. Costs a
+  real prefill of ~L tokens (slow, eats the account's token/minute quota).
+- **✗ Documented exception (2026-10-30):**
+  `mistralai/mistral-large-4-1t-a52b` — the Specifications section said
+  262,144 but the card prose said 1M, and the probe's error body confirmed the
+  server actually enforces **1,048,576** (input+output). A success-side check
+  sealed it: ~1.01M tokens accepted (`usage.prompt_tokens=1,010,031`),
+  ~1.09M rejected (`actual=1090031`). So Specifications is the right *first*
+  check, not the *last* word.
+
 ### Measuring a model's real context length
 
 `scripts/probe-context-length.mjs` binary-searches token counts until the

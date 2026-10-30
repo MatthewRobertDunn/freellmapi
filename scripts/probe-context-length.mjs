@@ -12,7 +12,9 @@
  *     stays meaningful when the filler tokenizes differently than predicted.
  *   - If the provider states an exact limit in the error body (NIM does:
  *     details.type="context_length", details.limit=…), that is reported as the
- *     authoritative verdict and short-circuits the search.
+ *     authoritative verdict and short-circuits the search. NOTE: a stated
+ *     limit comes from a *refusal* — pass --confirm to additionally send one
+ *     accepted request at 0.97×limit and prove the boundary is really served.
  *   - 429s are throttling, NOT context failures: they are retried with backoff
  *     and never narrow the search.
  *
@@ -26,6 +28,9 @@
  *   --hi <n>          Starting upper-bound guess for REAL tokens, default 1000000
  *   --tries <n>       Max probes, default 16
  *   --timeout <ms>    Per-request timeout, default 120000
+ *   --confirm         After a stated-limit verdict, send one success-side
+ *                     request at 0.97×limit (real prefill cost — use when you
+ *                     actually rely on the number).
  *
  * Secrets come from the environment (NIM_API_KEY / NIM_BASE_URL), never a
  * committed file. For this install the current NIM key lives in
@@ -57,6 +62,7 @@ const MAX_TOKENS = arg('--max-tokens', 16);
 let hiReal = arg('--hi', 1000000); // upper bound in REAL tokens (known failure)
 const TRIES = arg('--tries', 16);
 const TIMEOUT = arg('--timeout', 120000);
+const CONFIRM = argv.includes('--confirm');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -175,10 +181,28 @@ async function probe(targetRealTokens) {
     }
   }
 
+  let confirmResult = null;
+  if (CONFIRM && exactLimit) {
+    // Success-side check: prove a request just under the stated limit is
+    // really served, instead of trusting a refusal to name the boundary.
+    const target = Math.floor(exactLimit * 0.97);
+    console.log(`\nconfirming stated limit ${exactLimit}: sending one request at ~${target} tokens…`);
+    await sleep(2000);
+    confirmResult = await probe(target);
+    push(target, confirmResult);
+  } else if (CONFIRM && !exactLimit) {
+    console.log('\n--confirm ignored: no provider-stated limit to confirm.');
+  }
+
   console.log('\n=== verdict ===');
   console.log('model:             ', MODEL, '@', BASE);
   if (exactLimit) console.log('provider-stated limit:', exactLimit, 'tokens (input+output)');
   if (loReal != null) console.log('max measured input:', loReal, 'prompt_tokens (server-reported usage,', `+${MAX_TOKENS} completion = ${loReal + MAX_TOKENS})`);
+  if (confirmResult) {
+    console.log(confirmResult.ok
+      ? `success-side check: LOOKS REAL — ~${Math.floor(exactLimit * 0.97)} tokens accepted (prompt_tokens=${confirmResult.promptTokens ?? '?'})`
+      : `success-side check: STATED LIMIT SUSPECT — request under the stated limit was REJECTED (HTTP ${confirmResult.status})`);
+  }
   console.log('verdict:           ', exactLimit ?? (loReal != null ? `>= ${loReal}, boundary below ${hiName}` : 'unknown'));
   console.log('probe trail:       ', JSON.stringify(trail));
   process.exit(exactLimit || loReal ? 0 : 1);

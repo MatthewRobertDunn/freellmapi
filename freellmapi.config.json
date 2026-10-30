@@ -34,8 +34,13 @@
     },
     {
       "platform": "nvidia",
-      "modelId": "z-ai/glm-5.3",
-      "displayName": "GLM 5.3 (NV)",
+      "modelId": "mistralai/mistral-large-4-1t-a52b",
+      "displayName": "Mistral Large 4 (NV)",
+      "intelligenceRank": 50,
+      "sizeLabel": "Frontier",
+      "contextWindow": 1048576,
+      "supportsVision": true,
+      "supportsTools": true,
       "fallbackEnabled": true
     },
     {
