@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { initDb, getDb } from '../../db/index.js';
-import { runFallbackLoop, newFallbackState, type FallbackState } from '../../lib/fallback-loop.js';
-import { isClientAbortError, newClientAbortError, isRetryableError } from '../../lib/error-classify.js';
+import { runFallbackLoop, newFallbackState, CLIENT_ABORT_ERROR_MS, type FallbackState } from '../../lib/fallback-loop.js';
+import { isClientAbortError, newClientAbortError, isRetryableError, isTimeoutErrorText } from '../../lib/error-classify.js';
 import { acquireLease, releaseLease, resetLeases, inFlightForKey } from '../../services/ratelimit.js';
 import type { RouteResult } from '../../services/router.js';
 
@@ -13,7 +13,11 @@ import type { RouteResult } from '../../services/router.js';
  * existing finally, and leave NO provider-failure trace — no cooldown, no
  * skip-key entry, no logFailure row, no exhaustion render. What it DOES leave
  * (#752) is a 'canceled' requests row, so the dashboard shows the request
- * happened; stats/scoring queries exclude that status everywhere.
+ * happened; stats/scoring queries exclude that status everywhere. One
+ * exception: if the attempt already sat silent past CLIENT_ABORT_ERROR_MS
+ * (180s) before the client gave up, the row is written as an 'error' instead —
+ * a stalled upstream the client abandoned is a real-use-failure signal and is
+ * counted in reliability/timeout stats, so the router stops preferring it.
  */
 
 let keySeq = 900;
@@ -143,6 +147,87 @@ describe('fallback loop on client abort', () => {
     // used to leave no parent row and therefore no ladder either.
     const attempts = getDb().prepare('SELECT outcome FROM request_attempts WHERE request_id = ?').all(row.id) as any[];
     expect(attempts.map(a => a.outcome)).toEqual(['client_abort']);
+  });
+
+  it("an abort just under the threshold is still a 'canceled' row", async () => {
+    const state = newFallbackState();
+    const { route } = leasedRoute();
+    const t0 = 1_700_000_000_000;
+    let fakeNow = t0;
+    vi.spyOn(Date, 'now').mockImplementation(() => fakeNow);
+    await runFallbackLoop(hooks(state, {
+      route: () => route,
+      dispatch: async () => {
+        fakeNow = t0 + CLIENT_ABORT_ERROR_MS - 1_000;
+        throw newClientAbortError();
+      },
+    }));
+
+    const row = getDb().prepare(
+      'SELECT status, latency_ms FROM requests ORDER BY id DESC LIMIT 1',
+    ).get() as any;
+    expect(row.status).toBe('canceled');
+    expect(row.latency_ms).toBe(CLIENT_ABORT_ERROR_MS - 1_000);
+  });
+
+  it("an abort past CLIENT_ABORT_ERROR_MS (180s) is logged as an 'error' — a stalled upstream the client gave up on", async () => {
+    const state = newFallbackState();
+    const { route } = leasedRoute();
+    const t0 = 1_700_000_000_000;
+    let fakeNow = t0;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => fakeNow);
+    // No cooldown/penalty still applies (the test below), but the row itself
+    // must read as a failure so stats count it against the model.
+    await runFallbackLoop(hooks(state, {
+      route: () => route,
+      dispatch: async () => {
+        fakeNow = t0 + CLIENT_ABORT_ERROR_MS + 1_000;
+        throw newClientAbortError();
+      },
+    }));
+
+    const row = getDb().prepare(
+      'SELECT id, status, latency_ms, error FROM requests ORDER BY id DESC LIMIT 1',
+    ).get() as any;
+    expect(row.status).toBe('error');
+    expect(row.latency_ms).toBe(CLIENT_ABORT_ERROR_MS + 1_000);
+    expect(row.error).toContain('treated as error');
+    // The text carries the 'aborted' timeout marker (lib/error-classify.ts), so
+    // reliability/timeout stats fold the row in — the router stops preferring
+    // this model after enough of them.
+    expect(isTimeoutErrorText(row.error)).toBe(true);
+    // The attempt trace still persists, keyed to the (now error) parent row.
+    const attempts = getDb().prepare('SELECT outcome FROM request_attempts WHERE request_id = ?').all(row.id) as any[];
+    expect(attempts.map(a => a.outcome)).toEqual(['client_abort']);
+  });
+
+  it("the reclassified row still does NO failure bookkeeping (cooldowns/penalties stay out of the abort path)", async () => {
+    const state = newFallbackState();
+    const { route, keyId } = leasedRoute();
+    const t0 = 1_700_000_000_000;
+    let fakeNow = t0;
+    vi.spyOn(Date, 'now').mockImplementation(() => fakeNow);
+    const h = hooks(state, {
+      route: () => route,
+      dispatch: async () => {
+        fakeNow = t0 + CLIENT_ABORT_ERROR_MS + 2_000;
+        throw newClientAbortError();
+      },
+    });
+    await runFallbackLoop(h);
+
+    // The row reads as a failure (see the test above)…
+    const row = getDb().prepare('SELECT status FROM requests ORDER BY id DESC LIMIT 1').get() as any;
+    expect(row.status).toBe('error');
+    // …but nothing else changes: a vanished client is not a provider-health
+    // signal, even a 3-minute one. No failure stats, no cooldown, no skip
+    // state — the score dent comes solely from the row's status.
+    expect(h.logFailure).not.toHaveBeenCalled();
+    expect(h.onFatal).not.toHaveBeenCalled();
+    const cooldown = getDb().prepare('SELECT 1 FROM rate_limit_cooldowns WHERE platform = ? AND key_id = ?').get('fake', keyId);
+    expect(cooldown).toBeUndefined();
+    expect(state.skipKeys.size).toBe(0);
+    expect(state.skipModels.size).toBe(0);
   });
 
   it('clientGone still stops the loop before the next attempt after an ordinary failure', async () => {

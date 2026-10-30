@@ -164,6 +164,27 @@ describe('speed scoring: timeouts count against speed (#619)', () => {
     const steady = scores.find(s => s.modelId === 'steady')!;
     expect(hungup.reliability).toBeCloseTo(steady.reliability, 10);
   });
+
+  it("a long client abort reclassified as an 'error' row (>180s, fallback-loop CLIENT_ABORT_ERROR_MS) counts against both speed and reliability", () => {
+    addModel({ platform: 'google', modelId: 'steady', name: 'Steady', priority: 1 });
+    addModel({ platform: 'groq', modelId: 'stally', name: 'Stally', priority: 2 });
+    for (const [platform, modelId] of [['google', 'steady'], ['groq', 'stally']] as const) {
+      addRequests(platform, modelId, { count: 40, status: 'success', outTokens: 100, latencyMs: 1000, ttfbMs: 200 });
+    }
+    // Exactly the row the fallback loop now writes when the client hangs up
+    // past 180s (lib/fallback-loop.ts): status 'error', text carrying the
+    // 'aborted' timeout marker. Same health signal as any other upstream stall.
+    addRequests('groq', 'stally', {
+      count: 20, status: 'error', outTokens: 0, latencyMs: 200_000,
+      error: 'client disconnected after 200.0s; upstream request timed out (aborted with no response, treated as error)',
+    });
+
+    refreshStatsCache(getDb(), true);
+    expect(speedOf('stally')).toBeLessThan(speedOf('steady') - 0.2);
+    const { scores } = getRoutingScores();
+    expect(scores.find(s => s.modelId === 'stally')!.reliability)
+      .toBeLessThan(scores.find(s => s.modelId === 'steady')!.reliability);
+  });
 });
 
 describe('observed speed_rank writeback (#619)', () => {

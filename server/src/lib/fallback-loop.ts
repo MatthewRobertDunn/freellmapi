@@ -1364,6 +1364,13 @@ export async function runFallbackLoop(hooks: FallbackHooks): Promise<void> {
   }
 }
 
+// A client abort whose attempt already ran this long is treated as an
+// 'error' rather than a 'canceled' visibility row (see the write site below):
+// three minutes of connected waiting means the client gave up on an upstream
+// that produced nothing, which is a real-use-failure signal. Same 180s figure
+// the NVIDIA provider uses as its default attempt deadline.
+export const CLIENT_ABORT_ERROR_MS = 180_000;
+
 async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace): Promise<void> {
   const maxRetries = hooks.maxRetries ?? FALLBACK_MAX_RETRIES;
   const baseBudgetMs = hooks.timeBudgetMs ?? getFallbackTimeBudgetMs();
@@ -1532,8 +1539,20 @@ async function runFallbackLoopAttempts(hooks: FallbackHooks, trace: RequestTrace
         // Status 'canceled' is neither success nor failure — every stats/
         // scoring query excludes it — and this row is also the parent the
         // attempt-trace batch below keys to.
-        logRequest(route.platform, route.modelId, route.keyId, 'canceled', 0, 0, elapsedMs,
-          `client disconnected after ${(elapsedMs / 1000).toFixed(1)}s; upstream request canceled`);
+        //
+        // Exception: an abort after CLIENT_ABORT_ERROR_MS (180s) is treated as
+        // an 'error' — the client stayed connected that long and still got
+        // nothing, so this is an upstream stall the client abandoned, not a
+        // casual hang-up. The error text carries the 'aborted' timeout marker
+        // (lib/error-classify.ts), so it folds into the timeout stats like any
+        // other non-success row.
+        if (elapsedMs > CLIENT_ABORT_ERROR_MS) {
+          logRequest(route.platform, route.modelId, route.keyId, 'error', 0, 0, elapsedMs,
+            `client disconnected after ${(elapsedMs / 1000).toFixed(1)}s; upstream request timed out (aborted with no response, treated as error)`);
+        } else {
+          logRequest(route.platform, route.modelId, route.keyId, 'canceled', 0, 0, elapsedMs,
+            `client disconnected after ${(elapsedMs / 1000).toFixed(1)}s; upstream request canceled`);
+        }
         traceAttempt('client_abort');
         return;
       }
