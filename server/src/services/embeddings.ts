@@ -9,18 +9,21 @@
 // cross-provider redundancy for free.
 import { getDb, getSetting } from '../db/index.js';
 import { secondsUntilNextMonth } from './key-budget.js';
+import { noteBudgetAlerts } from './budget-alerts.js';
 import { parseRetryAfterMs } from '../providers/base.js';
 import { RetryHintTracker, retryAfterSeconds } from '../lib/retry-hint.js';
 import { getClientContext } from '../lib/client-context.js';
 import { reserveProviderCredential } from './provider-credential.js';
 import { proxyFetch } from '../lib/proxy.js';
 import { bearerAuthHeader } from '../lib/credential.js';
+import { markKeyHealthyFromRequest } from './health.js';
 import { customEndpointKeyIds } from './custom-endpoint.js';
 import type { Db } from '../db/types.js';
 import { SPEKA_BASE_URL } from '../providers/speka.js';
 import { ELECTRONHUB_BASE_URL } from '../providers/electronhub.js';
 import { INFERBASE_BASE_URL } from '../providers/inferbase.js';
 import { LLMTR_BASE_URL } from '../providers/llmtr.js';
+import { JAMAI_BASE_URL, jamaiHeaders } from '../providers/jamai.js';
 
 export interface EmbeddingModelRow {
   id: number;
@@ -109,6 +112,7 @@ const FETCH_TIMEOUT_MS = 30_000;
 
 /** Provider adapters that can safely receive catalog-managed embedding rows. */
 export const EMBEDDING_PLATFORMS = new Set([
+  'jamai',
   'google',
   'nvidia',
   'openrouter',
@@ -137,6 +141,7 @@ async function openAiStyleEmbed(
   dimensions?: number,
   expectedDimensions?: number,
   timeoutMs = FETCH_TIMEOUT_MS,
+  headers?: Record<string, string>,
 ): Promise<ProviderCallResult> {
   const body: Record<string, unknown> = { model: modelId, input: inputs, ...extra };
   // Some providers (NVIDIA NeMo NIM, Google Gemini Embedding, OpenAI v3) support
@@ -150,11 +155,14 @@ async function openAiStyleEmbed(
     method: 'POST',
     // A custom endpoint with auth off holds the `no-key` sentinel: omit the
     // header instead of sending `Bearer no-key` (#1331).
-    headers: { 'Content-Type': 'application/json', ...bearerAuthHeader(key) },
+    headers: headers ?? { 'Content-Type': 'application/json', ...bearerAuthHeader(key) },
+    ...(platform === 'jamai' ? { redirect: 'error' as const } : {}),
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   }, platform, 'embedding', timeoutMs);
   if (!r.ok) {
+    // JamAI error bodies may echo credential-bearing request headers.
+    if (platform === 'jamai') throw new EmbeddingsError(`JamAI embeddings error (HTTP ${r.status})`, r.status, undefined, parseRetryAfterMs(r.headers.get('retry-after')));
     throw await upstreamEmbeddingsError(r);
   }
   const j = (await r.json()) as {
@@ -163,7 +171,7 @@ async function openAiStyleEmbed(
     usage?: { prompt_tokens?: number; total_tokens?: number };
   };
   const data = [...(j.data ?? [])].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
-  if (['electronhub', 'inferbase', 'llmtr'].includes(platform) && (
+  if (['electronhub', 'inferbase', 'llmtr', 'jamai'].includes(platform) && (
     j.model !== modelId || data.length !== inputs.length ||
     data.some((d, i) => d.index !== i || !Array.isArray(d.embedding) ||
       d.embedding.length !== (dimensions ?? expectedDimensions) ||
@@ -171,7 +179,7 @@ async function openAiStyleEmbed(
   )) {
     // A successful HTTP response is not enough: wrong model/dimension or
     // malformed vectors would corrupt the caller's embedding family.
-    const provider = platform === 'electronhub' ? 'ElectronHub' : platform === 'llmtr' ? 'LLMTR' : 'Inferbase';
+    const provider = platform === 'jamai' ? 'JamAI' : platform === 'electronhub' ? 'ElectronHub' : platform === 'llmtr' ? 'LLMTR' : 'Inferbase';
     throw new EmbeddingsError(`${provider} returned mismatched or malformed embeddings`, 502);
   }
   return {
@@ -288,6 +296,12 @@ async function callProvider(row: EmbeddingModelRow, credential: ProviderCredenti
       return openAiStyleEmbed(`${ELECTRONHUB_BASE_URL}/embeddings`, row.platform, key, row.model_id, inputs, { encoding_format: 'float' }, dimensions, row.dimensions);
     case 'inferbase':
       return openAiStyleEmbed(`${INFERBASE_BASE_URL}/embeddings`, row.platform, key, row.model_id, inputs, { encoding_format: 'float' }, dimensions, row.dimensions);
+    case 'jamai':
+      if (dimensions !== undefined && dimensions !== row.dimensions) {
+        throw new EmbeddingsError('JamAI does not support an embedding dimension override', 400);
+      }
+      return openAiStyleEmbed(`${JAMAI_BASE_URL}/embeddings`, row.platform, '', row.model_id, inputs,
+        { type: 'document', encoding_format: 'float' }, undefined, row.dimensions, FETCH_TIMEOUT_MS, jamaiHeaders(key));
     case 'llmtr':
       // The catalog-approved models return fixed-width vectors. Do not send a
       // dimension override or accept a substituted model/embedding space.
@@ -358,6 +372,9 @@ function logEmbeddingRequest(
       INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type, client_ip, client_user_agent, client_agent)
       VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'embedding', ?, ?, ?)
     `).run(row.platform, row.model_id, keyId, status, inputTokens, latencyMs, error, client.ip, client.userAgent, client.agent);
+    // Soft budget alert (#1158 follow-on): the ledger trigger fired with this
+    // row, so compare the caps once. No-op for uncapped keys.
+    if (status === 'success' && keyId != null) noteBudgetAlerts(keyId);
   } catch (e) {
     console.error('Failed to log embedding request:', e);
   }
@@ -408,6 +425,11 @@ export async function runEmbeddings(model: string | undefined, inputs: string[],
       }
       const tokens = out.inputTokens ?? estimateTokens(inputs);
       logEmbeddingRequest(row, credential.id, 'success', tokens, Date.now() - started, null);
+      // A served embedding is evidence the key works, the same as a served
+      // chat request (#1493) or a served search (#1612): stamp last_healthy_at
+      // and lift an 'unknown'/'error' key. Embedding-only keys (and #1459-era
+      // providers that refuse probes) had no success signal at all otherwise.
+      markKeyHealthyFromRequest(credential.id);
       return {
         family,
         platform: row.platform,

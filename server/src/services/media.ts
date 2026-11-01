@@ -11,20 +11,24 @@ import { getDb } from '../db/index.js';
 import { parseRetryAfterMs } from '../providers/base.js';
 import { RetryHintTracker } from '../lib/retry-hint.js';
 import { secondsUntilNextMonth } from './key-budget.js';
+import { noteBudgetAlerts } from './budget-alerts.js';
 import { getClientContext } from '../lib/client-context.js';
 import { reserveProviderCredential } from './provider-credential.js';
 import { proxyFetch } from '../lib/proxy.js';
 import { bearerAuthHeader } from '../lib/credential.js';
 import { assessProviderUrl } from '../lib/url-guard.js';
 import { isOnCooldown, setCooldown } from './ratelimit.js';
+import { markKeyHealthyFromRequest } from './health.js';
 import { SPEECHIFY_BASE_URL, SPEECHIFY_VERSION } from '../providers/speechify.js';
 import { TYPHOON_BASE_URL } from '../providers/typhoon.js';
 import { ELECTRONHUB_BASE_URL } from '../providers/electronhub.js';
 import { FREEAI_BASE_URL, freeAiAudioUrl } from '../providers/freeai.js';
+import { KENARI_BASE_URL, requireKenariFreeModel } from '../providers/kenari.js';
+import { PLUGSKY_BASE_URL } from '../providers/plugsky.js';
 
 /** Platforms with a media adapter below. catalog-sync gates media rows on this
  *  (decoupled from the chat provider registry — e.g. SiliconFlow is media-only). */
-export const MEDIA_PLATFORMS = new Set(['nvidia', 'pollinations', 'cloudflare', 'siliconflow', 'google', 'speechify', 'electronhub', 'freeai']);
+export const MEDIA_PLATFORMS = new Set(['nvidia', 'pollinations', 'cloudflare', 'siliconflow', 'google', 'speechify', 'electronhub', 'freeai', 'kenari', 'plugsky']);
 
 /** Video uses a dedicated optional catalog registry so binaries that predate
  *  this modality ignore the rows instead of accidentally ingesting them as
@@ -37,7 +41,7 @@ const KEYLESS_CAPABLE = new Set(['pollinations']);
 /** Platforms with a speech-to-text adapter below. catalog-sync gates the
  *  catalog's `transcriptionModels` entries on this, the way MEDIA_PLATFORMS
  *  gates the generative-media rows. */
-export const TRANSCRIPTION_PLATFORMS = new Set(['groq', 'cloudflare', 'typhoon']);
+export const TRANSCRIPTION_PLATFORMS = new Set(['groq', 'cloudflare', 'typhoon', 'mistral']);
 
 // 'transcription' rows live in media_models like the other modalities; they
 // arrive via the catalog's dedicated `transcriptionModels` array (see
@@ -356,6 +360,41 @@ async function callImageProvider(
   const key = credential.key;
   const [w, h] = parseSize(p.size);
   switch (row.platform) {
+    case 'plugsky': {
+      // Both routes share the monthly image allowance. dall-e-3 is Plugsky's
+      // compatibility alias for FLUX Dev, NOT OpenAI DALL-E (catalog label).
+      if (!['plugsky-flux', 'dall-e-3'].includes(row.model_id)) {
+        throw new MediaError('Plugsky requires a verified free image route', 400);
+      }
+      const r = await mediaFetch(`${PLUGSKY_BASE_URL}/images/generations`, 'plugsky', 'image', {
+        method: 'POST', redirect: 'error',
+        headers: { 'Content-Type': 'application/json', ...bearerAuthHeader(key) },
+        body: JSON.stringify({ model: row.model_id, prompt: p.prompt, n: p.n ?? 1,
+          ...(p.size ? { size: p.size } : {}), response_format: 'b64_json' }),
+      });
+      const j = await r.json() as { data?: { b64_json?: unknown }[]; error?: unknown } | null;
+      if (j?.error || !Array.isArray(j?.data) || !j.data.length ||
+          j.data.some(i => !i || typeof i.b64_json !== 'string' || !i.b64_json.trim())) {
+        throw new MediaError('plugsky returned no image data', 502);
+      }
+      return j.data.map(i => ({ b64_json: i.b64_json as string }));
+    }
+    case 'kenari': {
+      requireKenariFreeModel(row.model_id);
+      const r = await mediaFetch(`${KENARI_BASE_URL}/images/generations`, 'kenari', 'image', {
+        method: 'POST',
+        redirect: 'error',
+        headers: { 'Content-Type': 'application/json', ...bearerAuthHeader(key) },
+        body: JSON.stringify({ model: row.model_id, prompt: p.prompt, n: p.n ?? 1,
+          size: p.size ?? '1024x1024', response_format: 'b64_json' }),
+      });
+      const j = await r.json() as { data?: { b64_json?: unknown }[]; error?: unknown } | null;
+      if (j?.error || !Array.isArray(j?.data) || !j.data.length ||
+          j.data.some(i => !i || typeof i.b64_json !== 'string' || !i.b64_json.trim())) {
+        throw new MediaError('kenari returned no image data', 502);
+      }
+      return j.data.map(i => ({ b64_json: i.b64_json as string }));
+    }
     case 'custom': {
       if (!credential.baseUrl) throw new MediaError('custom image provider is missing base_url', 500);
       const body: Record<string, unknown> = { model: row.model_id, prompt: p.prompt };
@@ -818,6 +857,12 @@ function logMedia(row: Pick<MediaModelRow, 'platform' | 'model_id' | 'modality'>
       .prepare(`INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type, client_ip, client_user_agent, client_agent)
                 VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?)`)
       .run(row.platform, row.model_id, keyId, status, latencyMs, error, row.modality, client.ip, client.userAgent, client.agent);
+    // A served media request is evidence the key works, the same as a served
+    // chat request (#1493) or a served search (#1612): stamp last_healthy_at
+    // and lift an 'unknown'/'error' key out of the pool's cold corner.
+    if (status === 'success' && keyId != null) markKeyHealthyFromRequest(keyId);
+    // Soft budget alert (#1158 follow-on), same hook as the chat path.
+    if (status === 'success' && keyId != null) noteBudgetAlerts(keyId);
   } catch (e) {
     console.error('Failed to log media request:', e);
   }
@@ -1069,6 +1114,22 @@ async function callTranscriptionProvider(
 ): Promise<Omit<TranscriptionResult, 'platform' | 'modelId'>> {
   const key = credential.key;
   switch (m.platform) {
+    case 'mistral': {
+      // Voxtral accepts multipart file/model, language and temperature, not
+      // Whisper's prompt or response_format. Normalize JSON/text locally.
+      const form = new FormData();
+      form.append('file', new Blob([p.file], { type: p.mimeType || 'application/octet-stream' }), p.filename);
+      form.append('model', m.modelId);
+      if (p.language) form.append('language', p.language);
+      if (p.temperature !== undefined) form.append('temperature', String(p.temperature));
+      const r = await mediaFetch('https://api.mistral.ai/v1/audio/transcriptions', 'mistral', 'transcription', {
+        method: 'POST', redirect: 'error', headers: { ...bearerAuthHeader(key) }, body: form,
+      });
+      const j = await r.json() as { text?: unknown; language?: unknown; segments?: unknown; error?: unknown } | null;
+      if (j?.error || typeof j?.text !== 'string') throw new MediaError('mistral returned no transcription text', 502);
+      return { text: j.text, language: typeof j.language === 'string' ? j.language : undefined,
+        segments: Array.isArray(j.segments) ? j.segments : undefined };
+    }
     case 'typhoon': {
       // The tested API accepts file + model and returns {text, usage}.
       // Do not forward Whisper-only options or claim native subtitle support.

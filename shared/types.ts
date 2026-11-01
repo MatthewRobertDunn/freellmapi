@@ -72,10 +72,19 @@ export type Platform =
   | 'aclide'
   // OpenAI-compatible chat and embeddings; one shared $1 monthly allowance.
   | 'speka'
+  // Named free chat/image routes share one renewable daily account allowance.
+  | 'kenari'
+  | 'kiosapi'
   // Decision-only JEV adapter; promotional availability is catalog-managed.
   | 'beatapi'
   // Free-category chat and decisions share one weighted daily allowance.
   | 'apinex'
+  // OpenAI-compatible gateway; free models share a 30-calls/5-hour account
+  // allowance on top of a site-wide pool (issue #1460).
+  | 'onomeo'
+  // OpenAI-compatible gateway; the free tier is one account-wide monthly
+  // token allowance (30M, resets monthly; issue #1649).
+  | 'iteracompute'
   // Ongoing free research API for chat and speech recognition; catalog only.
   | 'typhoon'
   // Permanent free chat aliases, shared fair-use quota; signed catalog only.
@@ -92,6 +101,9 @@ export type Platform =
   // Hosted vision API: $5/workspace in recurring monthly credits, shared
   // across models. Signed catalog only; no bundled model seeds.
   | 'moondream'
+  | 'jamai'
+  // One shared renewable monthly credit allowance; signed catalog only.
+  | 'nabh'
   // Hosted gateways; model rows are delivered by the signed catalog only.
   // ElectronHub renews weekly credits; Experiential renews monthly credits.
   | 'electronhub'
@@ -139,6 +151,10 @@ export type Platform =
   | 'linkup'
   | 'parallel'
   | 'serpsearch'
+  | 'keenable'
+  | 'halx'
+  | 'aisense'
+  | 'brave'
   | 'cloudflare'
   | 'zhipu'
   | 'ollama'
@@ -214,11 +230,13 @@ export type Platform =
   // in the hosted catalog (premium now, free after the 30-day model-age gate).
   | 'xkiro'
   // ModelScope (魔搭社区, Alibaba) — OpenAI-compatible inference API
-  // (api-inference.modelscope.cn/v1). Free tier is 2000 requests/day
-  // account-wide, but calls only work after the ModelScope account is bound to
-  // an Alibaba Cloud CHINA-site (cn) account with Chinese real-name
-  // verification — tokens mint without binding, then every call 401s. Catalog
-  // rows land after community testing confirms per-model behavior (#581).
+  // (api-inference.modelscope.cn/v1). Free tier moved to magic-grain (魔粒)
+  // metering in 2026-08: ~250 魔粒/day account-wide at ~2 魔粒 per request
+  // (observed 2026-08-14) ≈ 125 requests/day, but calls only work after the
+  // ModelScope account is bound to an Alibaba Cloud CHINA-site (cn) account
+  // with Chinese real-name verification — tokens mint without binding, then
+  // every call 401s. Catalog rows land after community testing confirms
+  // per-model behavior (#581).
   | 'modelscope'
   // ── Chinese domestic providers (#922/#923/#924) ────────────────────────────
   // All four need Chinese real-name verification (实名认证) on the cloud account
@@ -267,7 +285,7 @@ export type Platform =
  *  web_search tools), never chat. Search engine rows arrive through the
  *  catalog's `searchEngines` registry. The server keeps its own runtime copy in
  *  server/src/lib/search-platforms.ts (shared is type-only on the server). */
-export const SEARCH_PLATFORMS = ['tavily', 'exa', 'firecrawl', 'linkup', 'parallel', 'serpsearch'] as const;
+export const SEARCH_PLATFORMS = ['tavily', 'exa', 'firecrawl', 'linkup', 'parallel', 'serpsearch', 'keenable', 'brave'] as const;
 export type SearchPlatform = (typeof SEARCH_PLATFORMS)[number];
 
 export function isSearchPlatform(platform: string): platform is SearchPlatform {
