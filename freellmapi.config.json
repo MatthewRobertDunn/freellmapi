@@ -176,8 +176,6 @@
       "contextWindow": 1048576,
       "supportsVision": true,
       "supportsTools": true,
-      "rpmLimit": 5,
-      "rpdLimit": 100,
       "fallbackEnabled": true
     },
     {
@@ -214,15 +212,13 @@
       "platform": "custom",
       "endpoint": "https://aihubmix.com/v1",
       "modelId": "dots-3-note-preview-free",
-      "displayName": "Dots 3 Note Preview (AHM Free)",
+      "displayName": "Dots3 Note Preview (AHM Free)",
       "intelligenceRank": 50,
       "speedRank": 7,
       "sizeLabel": "Frontier",
       "contextWindow": 524288,
       "supportsVision": true,
       "supportsTools": true,
-      "rpmLimit": 5,
-      "rpdLimit": 100,
       "fallbackEnabled": true
     }
   ]
