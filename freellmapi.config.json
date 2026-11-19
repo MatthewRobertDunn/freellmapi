@@ -9,13 +9,6 @@
     },
     {
       "platform": "nvidia",
-      "modelId": "deepseek-ai/deepseek-v4.1-flash",
-      "displayName": "DeepSeek V4.1 Flash (NV)",
-      "contextWindow": 1048576,
-      "fallbackEnabled": true
-    },
-    {
-      "platform": "nvidia",
       "modelId": "meta/muse-glimmer-30b",
       "displayName": "Muse Glimmer 30B (NV)",
       "fallbackEnabled": true
@@ -220,6 +213,30 @@
       "supportsVision": true,
       "supportsTools": true,
       "fallbackEnabled": true
+    },
+    {
+      "platform": "custom",
+      "endpoint": "https://aihubmix.com/v1",
+      "modelId": "coding-glm-5.3-free",
+      "displayName": "GLM 5.3 (AHM Free)",
+      "intelligenceRank": 20,
+      "speedRank": 6,
+      "sizeLabel": "Frontier",
+      "contextWindow": 1048576,
+      "supportsVision": false,
+      "supportsTools": true,
+      "rpmLimit": 5,
+      "rpdLimit": 100,
+      "fallbackEnabled": true
+    },
+    {
+      "platform": "nvidia",
+      "modelId": "moonshotai/kimi-k3.1-pro",
+      "displayName": "Kimi K3.1 Pro (NV)",
+      "contextWindow": 1048576,
+      "supportsVision": true,
+      "supportsTools": true,
+      "fallbackEnabled": false
     }
   ]
 }
