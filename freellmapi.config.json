@@ -60,7 +60,7 @@
       "intelligenceRank": 20,
       "speedRank": 6,
       "sizeLabel": "Frontier",
-      "contextWindow": 85000,
+      "contextWindow": 104785,
       "supportsVision": false,
       "supportsTools": true,
       "rpdLimit": 4000,

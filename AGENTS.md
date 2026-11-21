@@ -308,6 +308,40 @@ limit counts input **and** output tokens together. Verified 2026-10-24:
 success was ~201.8k input tokens + 16 output; throttle your probe pace — the
 account hits token-per-minute 429s quickly at these sizes).
 
+## Retrieving a stored provider key (direct-backend tests)
+
+Sometimes you need the provider's own key to call its API directly, bypassing
+the router — e.g. sending a 100k-token probe that the router's local context
+gate would refuse, or reading an upstream error body verbatim. Keys are
+encrypted at rest; the way to read one back out is
+`GET /api/keys/export?format=json` (`server/src/routes/keys.ts`,
+`keysRouter.get('/export')`). It needs **both**:
+
+- `Authorization: Bearer <dashboard token>` (a session token, not the proxy key)
+- `x-reauth-password: <dashboard password>` (password re-verification)
+
+`scripts/get-provider-key.mjs` wraps this (same `DT` / `DASH_PASSWORD` env
+pattern as `probe-context-length.mjs`):
+
+```bash
+ORCA_KEY=$(DT='<dashboard token>' DASH_PASSWORD='<dashboard password>' \
+  node scripts/get-provider-key.mjs orcarouter)
+curl -s https://api.orcarouter.ai/v1/chat/completions \
+  -H "Authorization: Bearer $ORCA_KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"tencent/hy4-preview-free","messages":[{"role":"user","content":"ping"}],"max_tokens":16}'
+unset ORCA_KEY
+```
+
+Notes:
+
+- One argument: the provider slug (`orcarouter`, `nvidia`, …). With several
+  keys per platform, add `--label '<label>'`; run bare to list the labels.
+- The script prints **only the key** to stdout so it can be captured straight
+  into a variable. Never `echo` it, log it, paste it into chat, or write it
+  to a file you won't shred — treat stdout as the secret.
+- The dashboard password here is the one in `CREDENTIALS.local.md`; pass it
+  via env, never bake it into a committed file.
+
 ## Custom (non-catalog) endpoints
 
 For an OpenAI-compatible endpoint that is not a registered provider, declare it
