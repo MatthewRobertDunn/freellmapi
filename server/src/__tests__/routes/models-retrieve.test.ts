@@ -101,9 +101,18 @@ describe('GET /v1/models/:id (models.retrieve)', () => {
     expect(auto.status).toBe(200);
     expect(auto.body).toMatchObject({ id: 'auto', object: 'model', owned_by: 'freellmapi' });
 
+    // The global-sort axes are advertised, so each one must be retrievable.
+    for (const id of ['auto:balanced', 'auto:smart', 'auto:fast']) {
+      const got = await request(app, 'GET', `/v1/models/${encodeURIComponent(id)}`, undefined, authHeaders());
+      expect(got.status, `${id} must be retrievable`).toBe(200);
+      expect(got.body).toMatchObject({ id, object: 'model', owned_by: 'freellmapi' });
+    }
+
+    // The ids the listing stopped auto-adding as of 2026-11-22 (fusion, the
+    // Claude family slots, per-profile `auto:<name>`) are no longer advertised,
+    // so retrieve answers the same 404 it would for any unlisted id.
     const fusion = await request(app, 'GET', '/v1/models/fusion', undefined, authHeaders());
-    expect(fusion.status).toBe(200);
-    expect(fusion.body.id).toBe('fusion');
+    expect(fusion.status).toBe(404);
   });
 
   it('answers an unknown id with OpenAI\'s 404 shape', async () => {

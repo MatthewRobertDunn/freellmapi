@@ -344,11 +344,130 @@ Notes:
 
 ## Custom (non-catalog) endpoints
 
-For an OpenAI-compatible endpoint that is not a registered provider, declare it
-under `customProviders` (with `baseUrl`, optional `apiKey`, `label`, and its
-`models`), then reference those models from `models`/`fallback` with
-`"platform": "custom"`. When two endpoints serve the same model id, add
-`"endpoint"` (the URL or its short handle) so the entry is unambiguous.
+For an OpenAI-compatible endpoint that is not a registered provider (a relay
+like AIHubMix, AxForge, VoidAI, CheapLLM…), add it in **two steps**: endpoint +
+key + model rows via the dashboard API, then per-model metadata via the
+declarative config. This is the flow this install actually uses.
+
+### Step 1 — probe the endpoint directly (before registering anything)
+
+The key lives in `CREDENTIALS.local.md` (gitignored). With `curl`, from the
+provider's real base URL:
+
+```bash
+# 0. Confirm the exact model id(s) the key can see — copy ids verbatim
+curl -s "$BASE/v1/models" -H "Authorization: Bearer $KEY"
+
+# 1. Chat: must return content, not an error envelope
+curl -s "$BASE/v1/chat/completions" -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"<id>","messages":[{"role":"user","content":"Reply with exactly: PONG"}],"max_tokens":200}'
+
+# 2. Forced tool call: finish_reason == "tool_calls" with a real call
+#    ALSO test tool_choice:"auto" — some relays ignore the forced form
+#    (CheapLLM did) but still do tools under auto. Judge supportsTools by the
+#    auto result; note the forced-form gap for proxy-side forced-call checks.
+
+# 3. Vision (only if claimed): send a locally generated image as a data URL
+#    (e.g. ImageMagick text render) and ask what word it contains — must not
+#    be guessable blind. A plan-level 400 (e.g. `vision_disabled_free_plan`)
+#    is a NO: record supportsVision:false, do not "leave it unset".
+
+# 4. Context length (when it will feed routing): binary-search probe
+NIM_API_KEY=$KEY NIM_BASE_URL=$BASE node scripts/probe-context-length.mjs <id> --hi 2000000
+#    --hi 2M makes the FIRST probe target ~1M tokens: if the relay states its
+#    limit in the error body, one rejected probe gives an exact verdict at ~zero
+#    token cost. Watch the trail for HTTP 413s — those are request-body-size
+#    limits, not context errors.
+```
+
+Never invent metadata: set only fields the probes (or the operator) back up.
+
+### Step 2 — register endpoint + key + models (dashboard API, NOT the config file)
+
+The config file is **git-tracked** — a plaintext key there risks a commit. Keys
+go into the encrypted `api_keys` table via `POST /api/keys/custom` (needs a
+dashboard session token):
+
+```bash
+curl -s -X POST http://192.168.0.2:3001/api/keys/custom \
+  -H "Authorization: Bearer <dashboard token>" -H 'Content-Type: application/json' \
+  -d '{
+    "baseUrl": "https://relay.example/v1",
+    "apiKey": "<secret>",
+    "label": "RelayName",
+    "models": ["model-id-one", "model-id-two"],
+    "supportsTools": true
+  }'
+```
+
+- Creates one `api_keys` row (`platform='custom'`, `base_url`, label) + one
+  `models` row per id (`modelDbId` in the response). Note the row ids.
+- `label` names the endpoint on the Keys page (defaults to the host).
+- A **second key for the same endpoint**: same call again with the same
+  `baseUrl` and the new `apiKey` (a credential-only add; matching is on
+  `(base_url, secret)`, so it INSERTs rather than overwrites).
+- Discovery alternative: `POST /api/keys/custom/discover-models` lists what the
+  endpoint serves before committing.
+
+### Step 3 — patch metadata via the declarative config
+
+Add entries to the `models` array with `"platform": "custom"` **and**
+`"endpoint": "<the same baseUrl>"`:
+
+```json
+{
+  "platform": "custom",
+  "endpoint": "https://relay.example/v1",
+  "modelId": "model-id-one",
+  "displayName": "Model One (RelayName)",
+  "intelligenceRank": 35,
+  "contextWindow": 1000000,
+  "supportsVision": false,
+  "supportsTools": true,
+  "tpdLimit": 125000,
+  "fallbackEnabled": true
+}
+```
+
+These entries **edit** the rows created in Step 2 — a custom `models` entry
+cannot create a routable row on its own (it has no `key_id`/`base_url`; a
+no-match endpoint is refused with "register it under 'customProviders' first").
+The config-only alternative (`customProviders` in
+`freellmapi.config.json`) exists but puts the key in a git-tracked file — use
+the API flow above instead.
+
+### Step 4 — apply & verify
+
+```bash
+node -e 'JSON.parse(require("fs").readFileSync("freellmapi.config.json","utf8"))'
+systemctl --user restart freellmapi.service
+journalctl --user-unit freellmapi.service | grep '\[config\] applied' | tail -1
+# row check: displayName, ranks, contextWindow, supportsVision/Tools, tpdLimit
+```
+
+### Step 5 — test through the proxy
+
+```
+custom:<model_id>#<baseUrl>     # pinned to ONE relay — always use this form
+```
+
+E.g. `custom:glm-5.3-flash#https://api.voidai.app/v1`. The bare
+`custom:<model_id>` (no `#endpoint`) is ambiguous once two relays serve the same
+id. See [Pinning one provider's copy](#pinning-one-providers-copy-of-a-model).
+
+### Gotchas
+
+- Relay URIs get mis-pasted: an auth `401 invalid_key` at the given URL with a
+  key named after another domain means try the domain the key implies
+  (`sk-cheap-…` → `cheapllm.shop`), flagged to the operator.
+- Some relays are account-gated per feature, per plan: VoidAI free required a
+  linked Discord for any inference (`free_credit_verification_required`) and
+  disabled vision outright (`vision_disabled_free_plan`). A gate is an operator
+  action at the provider's dashboard, not a proxy fault — probe, report, retry.
+- Deleting a custom model row via `DELETE /api/models/<id>` also removes the
+  endpoint's key when no rows use it (`deleteUnusedCustomEndpointKey`) —
+  deleting the last model of an endpoint drops the key too.
 
 ## Deleting a model
 

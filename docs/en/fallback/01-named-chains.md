@@ -25,9 +25,9 @@ This refusal only triggers when a profile is active. A legacy install with no pr
 
 `activeChainOrThrow` (`router.ts`) is the single chokepoint: `auto`, an unknown `auto:` suffix, and a blank model string all route through it. It is also what `GET /api/fallback` and `/token-usage` read, so the dashboard and the router never disagree about what the active chain contains.
 
-## `auto:<name>` in `GET /v1/models`
+## `auto:<name>` per request
 
-Every custom routing profile is advertised to clients as a discoverable model id `auto:<name>` (`cc1e985`). `GET /v1/models` lists each named chain with its max context and availability, alongside the plain OpenAI-shaped catalog and the Claude family discovery ids. A client can switch chains per request by sending `model="auto:coding"` — no dashboard change, no key rotation. An unknown chain name returns a clear `400` instead of silently using the active chain.
+Every custom routing profile is reachable per request as `auto:<name>` (`cc1e985`) — a client switches chains by sending `model="auto:coding"`, no dashboard change, no key rotation. Since 2026-11-22 named chains are no longer advertised in `GET /v1/models`: on top of the catalog that listing carries only the virtual router ids, `auto` plus the global-sort axes `auto:balanced`, `auto:smart` and `auto:fast`. A profile still resolves when a client asks for it by id, it is simply not discoverable. An unknown chain name returns a clear `400` instead of silently using the active chain.
 
 Because the named-chain rows come from `profile_models` (not the global `fallback_config`), two installs can run entirely different model sets through the same unified key — the chain is selected by the request's `model` field, not by the account.
 

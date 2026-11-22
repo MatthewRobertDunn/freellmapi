@@ -19,5 +19,5 @@ This domain documents FreeLLMAPI's named fallback-chain system: how chains are s
 ## Related
 
 - [../architecture/](../architecture/) — Router, scoring, and failover internals that execute a resolved chain.
-- [../api/](../api/) — The `auto:*` routing strategies and `GET /v1/models` surface that expose named chains to clients.
+- [../api/](../api/) — The `auto:*` routing strategies and the `GET /v1/models` surface clients discover router ids through.
 - [../providers/](../providers/) — Per-key quota accounting and cooldowns that gate each hop in a chain.

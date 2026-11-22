@@ -29,7 +29,7 @@
       "platform": "nvidia",
       "modelId": "mistralai/mistral-large-4-1t-a52b",
       "displayName": "Mistral Large 4 (NV)",
-      "intelligenceRank": 50,
+      "intelligenceRank": 30,
       "sizeLabel": "Frontier",
       "contextWindow": 1048576,
       "supportsVision": true,
@@ -51,20 +51,6 @@
       "supportsTools": true,
       "rpdLimit": 800,
       "rpmLimit": 20,
-      "fallbackEnabled": true
-    },
-    {
-      "platform": "orcarouter",
-      "modelId": "tencent/hy4-preview-free",
-      "displayName": "Hy4 Preview (OrcaFree)",
-      "intelligenceRank": 20,
-      "speedRank": 6,
-      "sizeLabel": "Frontier",
-      "contextWindow": 104785,
-      "supportsVision": false,
-      "supportsTools": true,
-      "rpdLimit": 4000,
-      "rpmLimit": 100,
       "fallbackEnabled": true
     },
     {
@@ -111,7 +97,7 @@
       "platform": "nvidia",
       "modelId": "minimaxai/minimax-m3.1-flash",
       "displayName": "MiniMax M3.1 Flash (NV)",
-      "intelligenceRank": 50,
+      "intelligenceRank": 35,
       "sizeLabel": "Frontier",
       "contextWindow": 262144,
       "supportsVision": true,
@@ -175,18 +161,21 @@
       "fallbackEnabled": true
     },
     {
-      "platform": "kenari",
-      "modelId": "qwen4-max:free",
-      "displayName": "Qwen4 Max (Kenari)",
-      "intelligenceRank": 20,
-      "speedRank": 6,
-      "sizeLabel": "Frontier",
+      "platform": "apinex",
+      "modelId": "free/minimax-m3.1-flash",
+      "displayName": "MiniMax M3.1 Flash (Apinex)",
+      "intelligenceRank": 35,
       "contextWindow": 1000000,
       "supportsVision": true,
       "supportsTools": true,
-      "rpdLimit": 1000,
-      "rpmLimit": 10,
+      "tpdLimit": 12500000,
       "fallbackEnabled": true
+    },
+    {
+      "platform": "apinex",
+      "modelId": "free/glm-5.3-flash",
+      "displayName": "GLM-5.3 Flash (APINex Free)",
+      "intelligenceRank": 40
     },
     {
       "platform": "custom",
@@ -221,7 +210,7 @@
       "endpoint": "https://aihubmix.com/v1",
       "modelId": "coding-minimax-m3-free",
       "displayName": "MiniMax M3 (AHM Free)",
-      "intelligenceRank": 25,
+      "intelligenceRank": 60,
       "speedRank": 6,
       "sizeLabel": "Frontier",
       "contextWindow": 1000000,
@@ -267,6 +256,67 @@
       "supportsVision": true,
       "supportsTools": true,
       "fallbackEnabled": false
+    },
+    {
+      "platform": "custom",
+      "endpoint": "https://api.axforge.ai/v1",
+      "modelId": "glm-5.3-flash",
+      "displayName": "GLM 5.3 Flash (AxForge)",
+      "intelligenceRank": 40,
+      "sizeLabel": "Frontier",
+      "contextWindow": 500000,
+      "supportsVision": true,
+      "supportsTools": true,
+      "tpmLimit": 3000000,
+      "monthlyTokenBudget": "~3M/month",
+      "fallbackEnabled": true
+    },
+    {
+      "platform": "custom",
+      "endpoint": "https://proxy.gonkabroker.com/v1",
+      "modelId": "zai-org/GLM-5.3-Flash",
+      "displayName": "GLM 5.3 Flash (Gonka)",
+      "contextWindow": 400000,
+      "supportsVision": false,
+      "supportsTools": true,
+      "rpmLimit": 6,
+      "tpmLimit": 1000000,
+      "fallbackEnabled": true
+    },
+    {
+      "platform": "custom",
+      "endpoint": "https://api.voidai.app/v1",
+      "modelId": "deepseek-v4.1-flash",
+      "displayName": "DeepSeek V4.1 Flash (VoidAI)",
+      "intelligenceRank": 35,
+      "contextWindow": 1000000,
+      "supportsVision": false,
+      "supportsTools": true,
+      "tpdLimit": 125000,
+      "fallbackEnabled": true
+    },
+    {
+      "platform": "custom",
+      "endpoint": "https://api.voidai.app/v1",
+      "modelId": "glm-5.3-flash",
+      "displayName": "GLM 5.3 Flash (VoidAI)",
+      "intelligenceRank": 40,
+      "contextWindow": 1000000,
+      "supportsVision": false,
+      "supportsTools": true,
+      "tpdLimit": 125000,
+      "fallbackEnabled": true
+    },
+    {
+      "platform": "custom",
+      "endpoint": "https://cheapllm.shop/v1",
+      "modelId": "deepseek-v4.1-flash-1017",
+      "displayName": "DeepSeek V4.1 Flash 1017 (CheapLLM)",
+      "intelligenceRank": 35,
+      "contextWindow": 262144,
+      "supportsVision": true,
+      "supportsTools": true,
+      "fallbackEnabled": true
     }
   ]
 }

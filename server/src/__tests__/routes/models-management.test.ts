@@ -410,64 +410,56 @@ describe('Model management API', () => {
       .run(profileId, modelDbId, enabled);
   }
 
-  it('exposes custom profiles as auto:<name> chains in /v1/models (#960/#895)', async () => {
+  it('advertises only plain auto and the auto:<axis> routes on /v1/models', async () => {
+    // Everything else the listing used to auto-add is gone as of 2026-11-22:
+    // fusion, the Claude family slots (#880) and one `auto:<name>` per custom
+    // profile (#960/#895). A named chain still routes when a client asks for it
+    // by id — it is simply not advertised, so the list carries no ids a client
+    // would read as unregistered.
     seedGroqKey();
 
-    // A chain whose single member is enabled and backed by an enabled key.
     const servableId = seedChainOnlyModel('named-chain-servable', 111000);
     addToProfile(newProfile('my-group', 5), servableId);
-
-    // A chain whose single member is switched off in the chain: nothing in it
-    // can serve a request, so the entry must say so rather than claim ready.
     const prunedId = seedChainOnlyModel('named-chain-pruned', 222000);
     addToProfile(newProfile('off-group', 6), prunedId, 0);
 
     const listed = await request(app, 'GET', '/v1/models');
     expect(listed.status).toBe(200);
 
-    const chain = listed.body.data.find((m: any) => m.id === 'auto:my-group');
-    expect(chain).toBeDefined();
-    expect(chain.name).toContain('my-group');
-    expect(chain.object).toBe('model');
-    expect(chain.owned_by).toBe('freellmapi');
-    // The real point of the entry: is this chain usable right now, and how big
-    // a context can it take? Both are asserted, not merely present.
-    expect(chain.available).toBe(true);
-    expect(chain.unavailable_reason).toBeNull();
-    expect(chain.context_window).toBe(111000);
-    expect(chain.context_length).toBe(111000);
-
-    const off = listed.body.data.find((m: any) => m.id === 'auto:off-group');
-    expect(off).toBeDefined();
-    expect(off.available).toBe(false);
-    expect(off.unavailable_reason).toBe('no_models');
-
-    // The virtual auto: id must not collide with real catalog ids.
-    expect(listed.body.data.filter((m: any) => m.id === 'auto:my-group')).toHaveLength(1);
-  });
-
-  it('lists the Claude family ids on the plain OpenAI /v1/models too (#880)', async () => {
-    // routes/anthropic.ts only answers GET /v1/models when the caller sends an
-    // `anthropic-version` header. Claude Desktop's gateway picker does not, so
-    // the OpenAI-shaped listing has to carry the same Claude-shaped ids or the
-    // picker reports "found 0 models".
-    const listed = await request(app, 'GET', '/v1/models');
-    expect(listed.status).toBe(200);
-
-    for (const id of ['claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5']) {
+    const advertised = new Set(['auto', 'auto:balanced', 'auto:smart', 'auto:fast']);
+    for (const id of advertised) {
       const entry = listed.body.data.find((m: any) => m.id === id);
       expect(entry, `${id} must be listed`).toBeDefined();
       expect(entry.object).toBe('model');
       expect(entry.owned_by).toBe('freellmapi');
       expect(entry.available).toBe(true);
-      // The display name says where the request really goes — none of these is
-      // hosted Claude.
-      expect(entry.name).toMatch(/slot/);
     }
 
-    // Still one row per id.
+    // The whole virtual set: the global-sort axes, and nothing else.
+    const virtual = listed.body.data
+      .map((m: any) => m.id)
+      .filter((id: string) => id === 'auto' || id === 'fusion' || id.startsWith('auto:'));
+    expect(new Set(virtual)).toEqual(advertised);
+
+    // One entry per id: the virtual ids must not collide with each other or
+    // with a real catalog id.
     const ids = listed.body.data.map((m: any) => m.id);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('no longer lists the Claude family ids on the plain OpenAI /v1/models (#880)', async () => {
+    // routes/anthropic.ts still answers GET /v1/models with one id per Claude
+    // family when the caller sends an `anthropic-version` header. Those ids
+    // were mirrored onto the OpenAI-shaped listing too, for Claude Desktop's
+    // gateway picker — but as of 2026-11-22 only auto and the auto:<axis>
+    // routes are auto-added, so this listing carries no Claude-shaped ids any
+    // more. Requests naming them still resolve; they are just not advertised.
+    const listed = await request(app, 'GET', '/v1/models');
+    expect(listed.status).toBe(200);
+
+    for (const id of ['claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5']) {
+      expect(listed.body.data.find((m: any) => m.id === id), `${id} must not be listed`).toBeUndefined();
+    }
   });
 
   it('routes a request to model auto:<name> through that named chain (#960/#895)', async () => {

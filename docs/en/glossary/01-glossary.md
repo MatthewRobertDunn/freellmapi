@@ -9,7 +9,7 @@
 | **RPM / TPM** | Requests / tokens per minute — short-window quota. |
 | **Pool key** | Shared quota pool identifier (`provider-quota.ts:inferQuotaPoolKey`), e.g. `openrouter::free`, `google::project`, `custom::key123`. Keys in the same pool share one allowance. |
 | **Least-remaining** | Key selection strategy (`c4c0221`) that picks the key with the most remaining quota in the pool (`services/router.ts:getKeySelectionStrategy`), skipping `::account` pools. |
-| **`auto:<name>`** | Named fallback chain exposed as a selectable model in `GET /v1/models` (`cc1e985`) — e.g. `auto:fast` routes only through that chain. |
+| **`auto:<name>`** | `model` field form that picks a named fallback chain or a global-sort axis per request. As of 2026-11-22 `GET /v1/models` advertises only `auto`, `auto:balanced`, `auto:smart` and `auto:fast`; a custom profile still routes as `auto:<name>` without being listed (`cc1e985`). |
 | **Model-age gate** | Catalog sync rule: new models are `premium` for 30 days then become `free` on the next signed sync (`services/catalog-sync.ts`). |
 | **Bandit router** | Thompson-sampling router (`services/router.ts` + `scoring.ts`) that balances reliability/speed/intelligence/headroom posteriors with 10% explore. |
 | **In-flight window** | Concurrent request deduplication window — **not** deduplicated for idempotency (`95bc46f`, `services/idempotency.ts:16-20`) — a concurrent retry with the same `Idempotency-Key` may race. |

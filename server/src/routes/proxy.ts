@@ -37,8 +37,8 @@ import { enforceJsonContent } from '../lib/structured-output.js';
 import type { Platform } from '@freellmapi/shared/types.js';
 import { inferQuotaPoolKey, type QuotaObservationContext } from '../services/provider-quota.js';
 import { isUnifyEnabled, getModelGroups, resolveRequestedIdForDispatch } from '../services/model-groups.js';
-import { buildModelListing, servableContextWindow, type NormalizedModel } from '../services/model-listing.js';
-import { claudeFamilyDiscoveryEntries, resolveListedClaudeAlias } from '../services/anthropic-map.js';
+import { buildModelListing, type NormalizedModel } from '../services/model-listing.js';
+import { resolveListedClaudeAlias } from '../services/anthropic-map.js';
 import { compressRequest, formatCompressionHeader } from '../services/compression/pipeline.js';
 import { applyDecisionRouting, routingStrategyHeader } from '../services/routing-decision.js';
 import { startStreamKeepalive, streamKeepaliveMs } from '../lib/stream-keepalive.js';
@@ -50,6 +50,20 @@ export const proxyRouter = Router();
 // Requesting this id means "let the router decide" — identical to omitting
 // `model` entirely.
 const AUTO_MODEL_ID = 'auto';
+
+// The virtual ids the OpenAI-shaped listing advertises on top of the cataloged
+// groups: plain `auto` plus the global-sort axes documented in
+// docs/en/api/01-rest-api.md. Everything else the listing used to auto-add —
+// the `fusion` panel model, the Claude-family slots (#880) and one
+// `auto:<name>` per custom profile (#960/#895) — is off the listing as of
+// 2026-11-22 at an operator's request: a discovery list full of ids that were
+// never registered made the catalog hard to read. All of them still resolve as
+// request targets; they are simply not advertised any more.
+const AUTO_ROUTE_ALIASES: { id: string; name: string }[] = [
+  { id: 'auto:balanced', name: 'Auto: balanced (the default blend — reliability first, speed and intelligence split the rest)' },
+  { id: 'auto:smart', name: 'Auto: smart (favor the highest-intelligence models)' },
+  { id: 'auto:fast', name: 'Auto: fast (favor measured speed — throughput and time-to-first-byte)' },
+];
 
 function isAutoModel(modelId: string | undefined): boolean {
   if (!modelId) return true;
@@ -388,58 +402,10 @@ function buildCatalogEntries(filters: { onlyAvailable?: boolean; executionStatus
   const { models: allListed, autoContextWindow } = buildModelListing();
   const listed = filters.onlyAvailable ? allListed.filter(m => m.available === 1) : allListed;
 
-  // Named fallback chains (#960/#895): every user-defined profile is exposed
-  // as an `auto:<name>` model so a client can pick a specific fallback chain
-  // per request (auto:my-group) instead of only the active one. Available iff
-  // at least one model in that profile's chain can serve a request right now.
-  const profileRows = getDb().prepare(`
-    SELECT p.id, p.name,
-           EXISTS (
-             SELECT 1
-             FROM profile_models pm
-             JOIN models m ON m.id = pm.model_db_id AND m.enabled = 1
-             WHERE pm.profile_id = p.id AND pm.enabled = 1
-               AND EXISTS (
-                 SELECT 1 FROM api_keys k
-                 WHERE k.platform = m.platform AND k.enabled = 1
-                   AND (m.key_id IS NULL OR k.id = m.key_id)
-               )
-           ) AS usable,
-           (SELECT json_group_array(m2.context_window)
-            FROM profile_models pm2
-            JOIN models m2 ON m2.id = pm2.model_db_id AND m2.enabled = 1
-            WHERE pm2.profile_id = p.id AND pm2.enabled = 1) AS ctxs
-    FROM profiles p
-    WHERE p.type = 'custom'
-    ORDER BY p.sort_order, p.id
-  `).all() as { id: number; name: string; usable: number; ctxs: string | null }[];
-
-  // Claude-family discovery entries (#880). The Anthropic-shaped GET /v1/models
-  // in routes/anthropic.ts already lists one id per Claude family so clients
-  // that only accept Claude-looking ids can discover anything at all — but that
-  // handler only answers when the caller sends an `anthropic-version` header.
-  // Claude Desktop's gateway picker fetches this path WITHOUT that header, so
-  // it fell through to the OpenAI-shaped listing below and still saw zero
-  // Claude-shaped ids. Emit the same entries here, from the same builder, so
-  // both shapes agree on what the gateway will serve. Listed only when
-  // something can actually serve them, and never when the id would collide
-  // with a real catalog row.
-  const listedIds = new Set(listed.map(m => m.id));
-  const claudeFamilyEntries = allListed.some(m => m.available === 1)
-    ? claudeFamilyDiscoveryEntries()
-      .filter(a => !listedIds.has(a.id))
-      .map(a => ({
-        id: a.id,
-        object: 'model' as const,
-        created: 0,
-        owned_by: 'freellmapi',
-        name: a.displayName,
-        context_window: autoContextWindow,
-        context_length: autoContextWindow,
-        available: true,
-        unavailable_reason: null,
-      }))
-    : [];
+  // Auto-added virtual entries used to be computed here — `fusion`, the
+  // Claude-family slots (#880) and one `auto:<name>` per custom profile
+  // (#960/#895). They are no longer listed (2026-11-22): see AUTO_ROUTE_ALIASES.
+  // Requests for any of them still resolve; they are just not advertised.
 
   // Machine-readable execution filter: `?execution_status=ready` narrows to
   // models a request can actually serve RIGHT NOW (a key that is not scoped
@@ -473,33 +439,17 @@ function buildCatalogEntries(filters: { onlyAvailable?: boolean; executionStatus
       available: true,
       unavailable_reason: null,
     },
-    {
-      id: FUSION_MODEL_ID,
-      object: 'model',
+    ...AUTO_ROUTE_ALIASES.map(({ id, name }) => ({
+      id,
+      object: 'model' as const,
       created: 0,
       owned_by: 'freellmapi',
-      name: 'Fusion (panel of models answer in parallel, a judge synthesizes one answer)',
+      name,
       context_window: autoContextWindow,
       context_length: autoContextWindow,
-      // Available whenever auto is — fusion needs at least one routable model.
-      available: autoContextWindow != null,
-      unavailable_reason: autoContextWindow != null ? null : 'no_models',
-    },
-    ...claudeFamilyEntries,
-    ...profileRows.map(p => {
-      const ctx = servableContextWindow(JSON.parse(p.ctxs ?? '[]') as (number | null)[]);
-      return {
-        id: `auto:${p.name.toLowerCase()}`,
-        object: 'model',
-        created: 0,
-        owned_by: 'freellmapi',
-        name: `Auto: ${p.name} (named fallback chain)`,
-        context_window: ctx,
-        context_length: ctx,
-        available: p.usable === 1,
-        unavailable_reason: p.usable === 1 ? null : 'no_models',
-      };
-    }),
+      available: true,
+      unavailable_reason: null,
+    })),
     ...esFiltered.map(m => ({
       id: m.id,
       object: 'model',
