@@ -1,9 +1,10 @@
-# AGENTS.md — Adding models to this FreeLLMAPI install
+# AGENTS.md — Maintaining models on this FreeLLMAPI install
 
 This checkout (`/home/matty/freellmapi`, branch `matty`) is a source install of
-FreeLLMAPI that runs as a **systemd user service** in **production mode**. This
-document explains how to add or change models here using the **declarative
-startup config**, which is how this install manages its model list.
+FreeLLMAPI running as a **systemd user service** in **production mode**. This
+document covers adding, changing, testing, and removing models. The
+authoritative model list is the `models` array in `freellmapi.config.json` —
+read it rather than any snapshot here.
 
 ## How this install runs
 
@@ -17,98 +18,81 @@ startup config**, which is how this install manages its model list.
 | Database | `/home/matty/freellmapi/server/data/freeapi.db` |
 | Logs | `journalctl --user-unit freellmapi.service` |
 
-> Because this is production mode, the server **auto-runs DB migrations at
-> startup**. Do not run `npm run db:migration:up` against this database; that
-> path is for `NODE_ENV=development` only.
+> Production mode auto-runs DB migrations at startup. Do **not** run
+> `npm run db:migration:up` against this database; that path is for
+> `NODE_ENV=development` only.
 
-## TL;DR — add a model
+## TL;DR — add or change a model
 
-1. Add an entry to the `models` array in `freellmapi.config.json`.
-2. Restart the service: `systemctl --user restart freellmapi.service`
+1. Add/edit an entry in the `models` array of `freellmapi.config.json`.
+2. `systemctl --user restart freellmapi.service`
 3. Verify (see [Apply & verify](#apply--verify)).
 
-That is the whole loop. There is no hot reload; the config is read once per boot.
+## Credentials
 
-## Dashboard / API credentials
-
-Local-only credentials (dashboard email/password, a session token, and the proxy
-key) live in **`CREDENTIALS.local.md`** — it is **gitignored** (`*.local.md`), so
-it never lands in a commit. Read it for the current values and for copy-paste
-recipes: logging in to mint a dashboard bearer token, calling `/api/models`
-(list / add / edit / **test** / delete), and testing inference through `/v1`
-including a forced tool-call check.
-
-Two credentials, don't mix them up:
+Local-only credentials (dashboard email/password, session token, proxy key,
+per-provider keys) live in **`CREDENTIALS.local.md`** — gitignored (`*.local.md`),
+so they never land in a commit. It also holds copy-paste recipes for the
+dashboard API and proxy tests.
 
 - **Dashboard session token** → `Authorization: Bearer <token>` (or
-  `x-dashboard-token:`) authorizes **`/api/*`** (models, keys, fallback, …).
-  Mint it via `POST /api/auth/login`; it can expire.
+  `x-dashboard-token:`) authorizes **`/api/*`**. Mint via `POST /api/auth/login`;
+  it can expire.
 - **Proxy key** (`freellmapi-…`) authorizes **`/v1/*`** only — never `/api/*`.
 
 ## How the declarative config is wired
 
 `server/src/index.ts` calls `applyDeclarativeConfigFromEnv()` in `main()`,
-**after `initDb()` and before the HTTP listener starts** (`NODE_ENV=production`,
-so migrations are already applied). The implementation lives in
-`server/src/services/declarative-config.ts`.
-
-It is wired up through `.env`:
+after `initDb()` and before the HTTP listener starts. Implementation:
+`server/src/services/declarative-config.ts`. Wired via `.env`:
 
 ```env
 FREEAPI_CONFIG_PATH=/home/matty/freellmapi/freellmapi.config.json
 ```
 
-Precedence and shape:
-
 - `FREEAPI_CONFIG_JSON` (inline JSON) wins over `FREEAPI_CONFIG_PATH` if both
-  are set. Keep the file and use `FREEAPI_CONFIG_PATH` here.
-- The **top level is strict** — only these keys are accepted:
-  `admin`, `license`, `keys`, `customProviders`, `models`, `fallback`,
-  `routing`. An unknown top-level key fails the whole apply.
-- The config is applied inside a DB transaction and is **idempotent**: existing
-  keys, models, fallback rows and routing settings are updated in place, never
-  duplicated. Re-running a restart with the same file is safe.
+  are set. This install uses the file.
+- The top level is **strict** — only `admin`, `license`, `keys`,
+  `customProviders`, `models`, `fallback`, `routing` are accepted; an unknown
+  key fails the whole apply.
+- The config applies inside one DB transaction and is **idempotent** — existing
+  rows are updated in place, never duplicated.
 
 ## The `models` entry
 
-A `models` entry adds a model or edits one that already exists.
+A `models` entry adds a model or edits an existing one.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `platform` | string, **required** | Provider slug, e.g. `nvidia`. Must match a registered provider (see below) for the model to route. |
+| `platform` | string, **required** | Provider slug, e.g. `nvidia`. Must match a registered provider or the row cannot route. |
 | `modelId` | string, **required** | The provider's exact model id, e.g. `z-ai/glm-5.3`. |
-| `displayName` | string | Friendly label shown in the dashboard. Defaults to `modelId`. |
-| `intelligenceRank` | int 1–1000 | Lower = smarter (the router orders `intelligence_rank ASC`). Frontier models are ~1–40. |
-| `speedRank` | int | Lower = faster. The catalog uses 1–10 (`1 = fastest`). |
-| `sizeLabel` | string ≤ 40 | Capability tier: `Small` / `Medium` / `Large` / `Frontier`. Tier dominates the intelligence score. |
+| `displayName` | string | Dashboard label. Defaults to `modelId`. **Also determines the unified routing key** (see below) — include it in every entry. |
+| `intelligenceRank` | int 1–1000 | Lower = smarter (router orders `intelligence_rank ASC`). Frontier ≈ 1–40. |
+| `speedRank` | int | Lower = faster (catalog uses 1–10). |
+| `sizeLabel` | string ≤ 40 | Capability tier: `Small` / `Medium` / `Large` / `Frontier`; dominates the intelligence score. |
 | `contextWindow` | int / null | Context window in tokens. |
-| `supportsVision` | bool | Set only if the provider documents vision support. |
-| `supportsTools` | bool | Set only if the provider documents tool/function-calling support. |
+| `supportsVision` | bool | Only with probe- or provider-verified support. |
+| `supportsTools` | bool | Only with probe- or provider-verified support. |
 | `rpmLimit` / `rpdLimit` / `tpmLimit` / `tpdLimit` | int / null | Per-key rate limits. |
 | `monthlyTokenBudget` | string ≤ 80 | Free-form display string, e.g. `~2M (credits)`. |
-| `enabled` | bool | Default `true`. `false` keeps the row but stops it being routed. |
+| `enabled` | bool | Default `true`. `false` keeps the row but stops routing. |
 | `fallbackEnabled` | bool | Default `true`. `false` keeps the model out of the fallback chain. |
-| `endpoint` | string | Only for `custom` providers, to disambiguate relays (see below). |
+| `endpoint` | string | For `custom` rows only: which relay the entry means (required when several serve the same id). |
 
-### What an entry actually does
+Behavior:
 
-- **New `(platform, modelId)`** → inserted with `source = 'user'`. Catalog sync
-  will never update or prune a user-owned row, so it survives catalog refreshes.
-- **Existing row** (e.g. a model that already arrived from the catalog) → the
-  row is patched, and for catalog-managed rows an **override** is recorded so the
-  change is not clobbered by the next sync.
-- Either way the entry also ensures a `fallback_config` row and a `profile_models`
-  entry, so a newly declared model is immediately routable.
+- **New `(platform, modelId)`** → inserted with `source = 'user'`; catalog sync
+  never updates or prunes user-owned rows.
+- **Existing row** → patched; for catalog-managed rows an **override** is
+  recorded so the next sync cannot clobber the change.
+- Either way the entry ensures `fallback_config` + `profile_models` rows, so a
+  newly declared model is immediately routable.
 
-Only set capability fields (`supportsTools`, `supportsVision`, ranks, context
-window) to values you can back up. Per this repo's `CONTRIBUTING.md`: **no
-invented facts** — model ids, limits and endpoints must be verified against the
-provider, not recalled. Leaving a field out is honest ("unknown"), whereas a
-wrong value ships a bug.
+Set capability fields only to values a probe or the provider backs up — **no
+invented facts**. An omitted field is honest ("unknown"); a wrong value ships a
+bug.
 
-### Minimal vs. full entry
-
-Minimal (recommended when you don't have verified metadata):
+Minimal:
 
 ```json
 { "platform": "nvidia", "modelId": "z-ai/glm-5.3", "displayName": "GLM 5.3 (NV)" }
@@ -132,14 +116,11 @@ Full:
 
 ## Finding the platform slug
 
-Slugs are the `platform:` values registered in
-`server/src/providers/index.ts` (e.g. `nvidia` → NVIDIA NIM,
-`openrouter`, `groq`, `custom`). A model can only route if its `platform`
-matches a registered provider; a typo silently produces an unroutable row.
+Slugs are the `platform:` values registered in `server/src/providers/index.ts`
+(e.g. `nvidia`, `openrouter`, `groq`, `custom`). A typo produces an unroutable
+row.
 
 ## Fallback order and routing
-
-To control order, use the top-level `fallback` and `routing` keys:
 
 ```json
 {
@@ -149,78 +130,74 @@ To control order, use the top-level `fallback` and `routing` keys:
 }
 ```
 
-`priority` defaults to the array index. `strategy` is one of `priority`,
-`balanced`, `smartest`, `fastest`, `reliable`, `custom`.
+- `fallback`: `priority` defaults to array index; entries take `platform`,
+  `modelId`, optional `endpoint` (for custom relays), `enabled`.
+- `routing.strategy`: `priority` | `balanced` | `smartest` | `fastest` |
+  `reliable` | `custom` | `decision`; optional `weights` (`reliability`,
+  `speed`, `intelligence`) for `custom`; optional `keySelectionStrategy`
+  (`auto` | `least-remaining`) — which key of a platform to reach for.
 
 ## Pinning one provider's copy of a model
 
-With unify ON, one logical name (e.g. `glm-5.3-flash`) can cover several
-providers' rows, and a bare `id` in a request resolves to the whole group — the
-router then picks the best available member and may fail over to another
-provider. To target **one** provider's copy (no failover to the rest of the
-group), send the model as:
+With unify ON, one logical name (e.g. `glm-5.3-flash`) covers several providers'
+rows, and a bare `id` resolves to the whole group — the router picks the best
+available member and may fail over. To target **one** provider's copy, send:
 
 ```
 platform:model_id
 ```
 
-For example, `orcarouter:z-ai/glm-5.3-flash-free` forces the OrcaRouter row even
-though NVIDIA also serves a `z-ai/glm-5.3-flash` copy that the bare
-`z-ai/glm-5.3-flash-free` name can otherwise resolve to. `memberId(row)` is
-`` `${row.platform}:${row.model_id}` `` (`server/src/services/model-groups.ts`,
-`resolveRequestedIdToTieredMembers`); this exact match is checked before the bare
-`model_id` scan, so a platform prefix always wins. Note the separator is a
-**colon** — `orcarouter/...` (slash) is treated as a literal model id and 404s.
+E.g. `orcarouter:z-ai/glm-5.3-flash-free` forces the OrcaRouter row. `memberId(row)`
+is `` `${row.platform}:${row.model_id}` `` (`server/src/services/model-groups.ts`,
+`resolveRequestedIdToTieredMembers`); this exact match is checked before the
+bare `model_id` scan. The separator is a **colon** — `orcarouter/...` (slash) is
+a literal model id and 404s.
 
-This works only when unify is enabled. For `custom` relays that share a model id,
-append an endpoint instead: `custom:model_id#<endpoint-handle-or-url>`.
+For `custom` relays sharing a model id, append an endpoint:
+`custom:model_id#<endpoint-handle-or-url>`. A bare `custom:<model_id>` is
+ambiguous once two relays serve the same id.
 
-**How the unified routing key is derived** (`server/src/services/model-groups.ts`,
-`normalizeGroupKey`): from the row's **displayName**, not the model id. The
-provider suffix `" (…)"` is stripped (`stripProviderSuffix`), then the name is
-lowercased with whitespace/hyphens/underscores collapsed — so `GLM 5.3 Flash
-(NV)`, `GLM-5.3 Flash (APINex Free)` and `GLM 5.3 Flash (AxForge)` all group
-under the one key `glm-5.3-flash`. Consequences worth knowing:
+**How the unified routing key is derived** (`normalizeGroupKey` in
+`server/src/services/model-groups.ts`): from the row's **displayName**, not the
+model id. The provider suffix `" (…)"` is stripped (`stripProviderSuffix`), then
+the name is lowercased with whitespace/hyphens/underscores collapsed — `GLM 5.3
+Flash (NV)`, `GLM-5.3 Flash (APINex Free)` and `GLM 5.3 Flash (AxForge)` all
+group under one key. Consequences:
 
-- **Renaming a model's displayName moves it between groups.** Dropping `1017`
-  from `DeepSeek V4.1 Flash 1017 (CheapLLM)` folded it into the
-  `deepseek-v4.1-flash` group; the old `deepseek-v4.1-flash-1017` slug
-  disappears from `/v1/models`.
-- Two rows with the same stripped name but **no** `" (…)"` suffix still share
-  the group — the suffix is cosmetic for grouping. Keep it anyway (it is what
-  makes rows distinguishable on the dashboard), unless the goal is exactly a
-  shared label like the two `Deepseek V4.1 Flash` relays.
-- Genuine variants with different stripped names (`Llama 3.3 70B fp8-fast` vs
-  `Llama 3.3 70B`) stay separate by design; only an operator override
-  (`PUT /api/settings/unify` `merges`) can join them.
+- **Renaming a displayName moves the row between groups.** Dropping `1017` from
+  `DeepSeek V4.1 Flash 1017 (CheapLLM)` folded it into the
+  `deepseek-v4.1-flash` group; the old slug disappears from `/v1/models`.
+- Rows with no `" (…)"` suffix group on the bare name — the suffix is cosmetic
+  for grouping; keep it so rows stay distinguishable on the dashboard.
+- Different stripped names (`Llama 3.3 70B fp8-fast` vs `Llama 3.3 70B`) stay
+  separate by design; only an operator override (`PUT /api/settings/unify`,
+  `merges`) can join them.
 
 ## Providers that need a key
 
-Adding a model does **not** add credentials. NVIDIA NIM (and most providers)
-need an API key before the model can serve requests. Provide it either in the
-dashboard (Keys page) or declaratively:
+Adding a model does not add credentials. Provide a key in the dashboard (Keys
+page) or declaratively:
 
 ```json
 { "keys": [ { "platform": "nvidia", "key": "nvapi-...", "label": "main" } ] }
 ```
 
-A `keys` entry carries a plaintext secret, so keep secrets out of a file you
-share, and remember `.env`/the config file are protected only by filesystem
-permissions.
+A `keys` entry carries a plaintext secret — keep secrets out of committed
+files; `.env`/the config are protected only by filesystem permissions.
 
-## Applying & verifying
+## Apply & verify
 
 ```bash
-# 1. Validate the JSON is at least well-formed
+# 1. Validate JSON
 node -e 'JSON.parse(require("fs").readFileSync("freellmapi.config.json","utf8"))'
 
 # 2. Apply (config is read on boot)
 systemctl --user restart freellmapi.service
 
-# 3. Confirm the apply ran and how many edits it made
+# 3. Confirm the apply
 journalctl --user-unit freellmapi.service --no-pager | grep '\[config\] applied'
 
-# 4. Confirm the rows exist in the DB
+# 4. Confirm rows in the DB
 node -e 'const D=require("better-sqlite3");
 const db=new D("server/data/freeapi.db",{readonly:true});
 console.table(db.prepare(
@@ -228,153 +205,98 @@ console.table(db.prepare(
 ).all("nvidia"));'
 ```
 
-A healthy apply logs something like:
+Healthy apply log:
 
 ```
 [config] applied /home/matty/freellmapi/freellmapi.config.json: 0 keys, 0 custom models, 6 model edits, 6 fallback rows
 ```
 
-Per-entry problems are reported as warnings and **skipped**, not fatal — read the
-count and the `entries skipped` suffix, and grep for `[config]` warnings.
+Per-entry problems are warnings and **skipped**, not fatal — check the
+`entries skipped` suffix and grep for `[config]` warnings.
 
-## Testing NIM directly (backend, no router)
+## Probing a provider directly
 
-Sometimes you want to test the NVIDIA NIM backend itself, bypassing the router.
-The NIM key (`nvapi-…`) lives in `CREDENTIALS.local.md` (gitignored) along with
-the dashboard/proxy credentials. The backend base URL is
-`https://integrate.api.nvidia.com/v1/` (the same OpenAI-compatible API the
-`nvidia` provider wraps).
-
-Quick chat test (grab the key from `CREDENTIALS.local.md`; never hardcode it
-into committed files):
+To test a provider backend without the router (e.g. a large probe the local
+context gate would refuse, or an upstream error body verbatim), use the
+provider's key from `CREDENTIALS.local.md` and its base URL. NVIDIA NIM:
+`https://integrate.api.nvidia.com/v1/`.
 
 ```bash
 export NIM_API_KEY='<nvapi key from CREDENTIALS.local.md>'
 curl -s https://integrate.api.nvidia.com/v1/chat/completions \
   -H "Authorization: Bearer $NIM_API_KEY" -H 'Content-Type: application/json' \
-  -d '{"model":"minimaxai/minimax-m3.1-flash","messages":[{"role":"user","content":"ping"}],"max_tokens":16}'
+  -d '{"model":"<modelId>","messages":[{"role":"user","content":"ping"}],"max_tokens":16}'
 ```
 
-### Context length: verify the build.nvidia.com page spec with one probe
+### Context length
 
-When adding a NIM model, **always set `contextWindow`** — don't leave it unset.
-The cheap way to get a first value (and `supportsTools` / `supportsVision`
-too) is to fetch the model's page on build.nvidia.com, e.g.
+**Always set `contextWindow` for NIM models.** First value (plus
+`supportsTools`/`supportsVision`) comes from the model's build.nvidia.com page
+(Specifications/Capabilities blocks). Trust order:
 
-```
-https://build.nvidia.com/mistralai/mistral-large-4-1t-a52b
-```
+1. `details.limit` in a context-length **error body** — the serving stack's own
+   enforcement value; a rejected probe fails before prefill, so it costs
+   ~nothing.
+2. The page's **Specifications** section.
+3. The card prose (marketing) — never authoritative.
 
-The page fetches as Markdown and ends with a **Specifications** block plus a
-**Capabilities** block, e.g. `**Context Length:** 262,144 tokens`,
-`Function Calling: Supported`.
-
-- **Trust order (empirical, learn the hard way once):**
-  1. `details.limit` in a context-length **error body** — the serving stack's
-     own enforcement value; right in every case so far. A rejected request
-     fails at validation *before prefill*, so provoking the error costs
-     essentially nothing beyond building the payload.
-  2. The page's **Specifications** section — usually right, but has been wrong
-     once (see exception below).
-  3. The card **prose** — marketing. Sometimes right, never authoritative.
-
-So don't *assume* the page — **verify it with one probe**, because verifying
-is cheaper than being wrong:
+Verify with one probe:
 
 ```bash
 NIM_API_KEY=$NIM_API_KEY node scripts/probe-context-length.mjs <modelId>
+# options: --base <url> --max-tokens 16 --hi <upper-bound-guess> --tries 16 --timeout 120000 --confirm
+# base URL override: NIM_BASE_URL=<url>
 ```
 
-- The default first probe (~500k real tokens) lands above most NIM limits,
-  instantly 400s with `details.limit=<L>`, and the script stops — **one
-  request** yields the server-enforced limit.
-- `L == page spec` → page value verified, done. `L != page spec` → page was
-  wrong; use `L`. (Page specs give `supportsTools`/`supportsVision` too; those
-  aren't probe-able this way, take them from the page.)
-- If the first probe is *accepted* instead, the real context exceeds the
-  guess — the script keeps doubling until it errors.
-- **`--confirm`**: use when you will actually rely on the number (e.g. a 1M
-  window feeding routing). After the verdict it sends one *accepted* request
-  at 0.97×L — the refusal alone never proves the boundary is served. Costs a
-  real prefill of ~L tokens (slow, eats the account's token/minute quota).
-- **✗ Documented exception (2026-10-30):**
-  `mistralai/mistral-large-4-1t-a52b` — the Specifications section said
-  262,144 but the card prose said 1M, and the probe's error body confirmed the
-  server actually enforces **1,048,576** (input+output). A success-side check
-  sealed it: ~1.01M tokens accepted (`usage.prompt_tokens=1,010,031`),
-  ~1.09M rejected (`actual=1090031`). So Specifications is the right *first*
-  check, not the *last* word.
+- The default first probe (~500k tokens) lands above most NIM limits and 400s
+  with `details.limit=<L>`; `L !=` page spec means the page was wrong — use `L`.
+- If the first probe is accepted, the real context exceeds the guess and the
+  script keeps doubling until it errors.
+- `--confirm`: after a stated-limit verdict, sends one accepted request at
+  0.97×L — use when routing will rely on the number. Costs a real prefill
+  (~L tokens, slow).
+- NIM context errors look like
+  `{"details":{"type":"context_length","limit":262144,"actual":315564}}` — the
+  limit counts input **and** output tokens.
+- Large prefills hit token-per-minute 429s quickly; pace probes. With `--hi 2M`
+  the first probe targets ~1M tokens — relays that state their limit in the
+  error body answer exactly from one rejection.
+- HTTP 413s are request-body-size limits, not context errors.
 
-### Measuring a model's real context length
+## Retrieving a stored provider key
 
-`scripts/probe-context-length.mjs` binary-searches token counts until the
-provider rejects with a context-length error. It reads the true token count
-from `usage.prompt_tokens`, parses NVIDIA's exact limit out of the error body
-(`details.limit`), and backs off on 429s (throttling is not a context failure):
+`GET /api/keys/export?format=json` (`server/src/routes/keys.ts`) reads encrypted
+keys back out. Requires **both** `Authorization: Bearer <dashboard token>` and
+`x-reauth-password: <dashboard password>`.
 
-```bash
-NIM_API_KEY=$NIM_API_KEY node scripts/probe-context-length.mjs minimaxai/minimax-m3.1-flash
-# options: --base <url> --max-tokens 16 --hi <upper-bound-guess> --tries 16 --timeout 120000
-# usage for repetition: `curl -s -H "Authorization: Bearer $NIM_API_KEY" ...`
-```
-
-It prints the provider-stated limit (authoritative when given), the largest
-measured `usage.prompt_tokens` success, and the full probe trail. NIM's
-context errors look like
-`{"details":{"type":"context_length","limit":262144,"actual":315564}}` — the
-limit counts input **and** output tokens together. Verified 2026-10-24:
-`minimaxai/minimax-m3.1-flash` really does serve up to 262144 (largest measured
-success was ~201.8k input tokens + 16 output; throttle your probe pace — the
-account hits token-per-minute 429s quickly at these sizes).
-
-## Retrieving a stored provider key (direct-backend tests)
-
-Sometimes you need the provider's own key to call its API directly, bypassing
-the router — e.g. sending a 100k-token probe that the router's local context
-gate would refuse, or reading an upstream error body verbatim. Keys are
-encrypted at rest; the way to read one back out is
-`GET /api/keys/export?format=json` (`server/src/routes/keys.ts`,
-`keysRouter.get('/export')`). It needs **both**:
-
-- `Authorization: Bearer <dashboard token>` (a session token, not the proxy key)
-- `x-reauth-password: <dashboard password>` (password re-verification)
-
-`scripts/get-provider-key.mjs` wraps this (same `DT` / `DASH_PASSWORD` env
-pattern as `probe-context-length.mjs`):
+`scripts/get-provider-key.mjs` wraps it:
 
 ```bash
 ORCA_KEY=$(DT='<dashboard token>' DASH_PASSWORD='<dashboard password>' \
   node scripts/get-provider-key.mjs orcarouter)
 curl -s https://api.orcarouter.ai/v1/chat/completions \
   -H "Authorization: Bearer $ORCA_KEY" -H 'Content-Type: application/json' \
-  -d '{"model":"tencent/hy4-preview-free","messages":[{"role":"user","content":"ping"}],"max_tokens":16}'
+  -d '{"model":"<modelId>","messages":[{"role":"user","content":"ping"}],"max_tokens":16}'
 unset ORCA_KEY
 ```
 
-Notes:
-
-- One argument: the provider slug (`orcarouter`, `nvidia`, …). With several
-  keys per platform, add `--label '<label>'`; run bare to list the labels.
-- The script prints **only the key** to stdout so it can be captured straight
-  into a variable. Never `echo` it, log it, paste it into chat, or write it
-  to a file you won't shred — treat stdout as the secret.
-- The dashboard password here is the one in `CREDENTIALS.local.md`; pass it
-  via env, never bake it into a committed file.
+- One argument: the provider slug. Several keys per platform → `--label`; run
+  bare to list labels.
+- The script prints **only the key** to stdout — treat stdout as the secret:
+  never echo, log, or commit it.
 
 ## Custom (non-catalog) endpoints
 
-For an OpenAI-compatible endpoint that is not a registered provider (a relay
-like AIHubMix, AxForge, VoidAI, CheapLLM…), add it in **two steps**: endpoint +
-key + model rows via the dashboard API, then per-model metadata via the
-declarative config. This is the flow this install actually uses.
+For an OpenAI-compatible relay that is not a registered provider: endpoint +
+key + model rows via the dashboard API (Step 2), then per-model metadata via
+the declarative config (Step 3).
 
-### Step 1 — probe the endpoint directly (before registering anything)
+### Step 1 — probe the endpoint directly
 
-The key lives in `CREDENTIALS.local.md` (gitignored). With `curl`, from the
-provider's real base URL:
+Key from `CREDENTIALS.local.md`; `$BASE` = the relay's base URL:
 
 ```bash
-# 0. Confirm the exact model id(s) the key can see — copy ids verbatim
+# 0. Confirm exact model id(s) the key can see
 curl -s "$BASE/v1/models" -H "Authorization: Bearer $KEY"
 
 # 1. Chat: must return content, not an error envelope
@@ -382,31 +304,26 @@ curl -s "$BASE/v1/chat/completions" -H "Authorization: Bearer $KEY" \
   -H 'Content-Type: application/json' \
   -d '{"model":"<id>","messages":[{"role":"user","content":"Reply with exactly: PONG"}],"max_tokens":200}'
 
-# 2. Forced tool call: finish_reason == "tool_calls" with a real call
-#    ALSO test tool_choice:"auto" — some relays ignore the forced form
-#    (CheapLLM did) but still do tools under auto. Judge supportsTools by the
-#    auto result; note the forced-form gap for proxy-side forced-call checks.
+# 2. Tools: test BOTH tool_choice:"auto" and the forced form. Some relays
+#    ignore the forced form but still do tools under auto — judge
+#    supportsTools by the auto result.
 
-# 3. Vision (only if claimed): send a locally generated image as a data URL
-#    (e.g. ImageMagick text render) and ask what word it contains — must not
-#    be guessable blind. A plan-level 400 (e.g. `vision_disabled_free_plan`)
-#    is a NO: record supportsVision:false, do not "leave it unset".
+# 3. Vision (only if claimed): send a locally generated image (e.g. ImageMagick
+#    text render) as a data URL and ask what word it contains — must not be
+#    guessable blind. A plan-level 400 (e.g. `vision_disabled_free_plan`) is a
+#    NO: record supportsVision:false, do not leave it unset.
 
-# 4. Context length (when it will feed routing): binary-search probe
+# 4. Context (when it feeds routing):
 NIM_API_KEY=$KEY NIM_BASE_URL=$BASE node scripts/probe-context-length.mjs <id> --hi 2000000
-#    --hi 2M makes the FIRST probe target ~1M tokens: if the relay states its
-#    limit in the error body, one rejected probe gives an exact verdict at ~zero
-#    token cost. Watch the trail for HTTP 413s — those are request-body-size
-#    limits, not context errors.
 ```
 
-Never invent metadata: set only fields the probes (or the operator) back up.
+Heavy-reasoning models may need `max_tokens` in the thousands to finish
+thinking before answering (a vision probe that returns empty content with all
+reasoning tokens is inconclusive, not a failure).
 
-### Step 2 — register endpoint + key + models (dashboard API, NOT the config file)
+### Step 2 — register endpoint + key + models (dashboard API)
 
-The config file is **git-tracked** — a plaintext key there risks a commit. Keys
-go into the encrypted `api_keys` table via `POST /api/keys/custom` (needs a
-dashboard session token):
+The config file is git-tracked — keys go into the encrypted `api_keys` table:
 
 ```bash
 curl -s -X POST http://192.168.0.2:3001/api/keys/custom \
@@ -421,18 +338,16 @@ curl -s -X POST http://192.168.0.2:3001/api/keys/custom \
 ```
 
 - Creates one `api_keys` row (`platform='custom'`, `base_url`, label) + one
-  `models` row per id (`modelDbId` in the response). Note the row ids.
+  `models` row per id (`modelDbId` in the response) — note the row ids.
 - `label` names the endpoint on the Keys page (defaults to the host).
-- A **second key for the same endpoint**: same call again with the same
-  `baseUrl` and the new `apiKey` (a credential-only add; matching is on
-  `(base_url, secret)`, so it INSERTs rather than overwrites).
-- Discovery alternative: `POST /api/keys/custom/discover-models` lists what the
-  endpoint serves before committing.
+- Second key for the same endpoint: same call again with the same `baseUrl` and
+  the new `apiKey` (matching is on `(base_url, secret)`, so it INSERTs).
+- `POST /api/keys/custom/discover-models` lists what an endpoint serves before
+  committing.
 
 ### Step 3 — patch metadata via the declarative config
 
-Add entries to the `models` array with `"platform": "custom"` **and**
-`"endpoint": "<the same baseUrl>"`:
+Add entries with `"platform": "custom"` **and** `"endpoint": "<baseUrl>"`:
 
 ```json
 {
@@ -450,20 +365,15 @@ Add entries to the `models` array with `"platform": "custom"` **and**
 ```
 
 These entries **edit** the rows created in Step 2 — a custom `models` entry
-cannot create a routable row on its own (it has no `key_id`/`base_url`; a
-no-match endpoint is refused with "register it under 'customProviders' first").
-The config-only alternative (`customProviders` in
-`freellmapi.config.json`) exists but puts the key in a git-tracked file — use
-the API flow above instead.
+cannot create a routable row on its own (no `key_id`/`base_url`; a no-match
+endpoint is refused with "register it under 'customProviders' first"). The
+config-only `customProviders` alternative puts the key in a git-tracked file —
+use the API flow instead.
 
 ### Step 4 — apply & verify
 
-```bash
-node -e 'JSON.parse(require("fs").readFileSync("freellmapi.config.json","utf8"))'
-systemctl --user restart freellmapi.service
-journalctl --user-unit freellmapi.service | grep '\[config\] applied' | tail -1
-# row check: displayName, ranks, contextWindow, supportsVision/Tools, tpdLimit
-```
+Same as [Apply & verify](#apply--verify); check displayName, ranks,
+contextWindow, supportsVision/Tools, rate limits on the new rows.
 
 ### Step 5 — test through the proxy
 
@@ -471,41 +381,35 @@ journalctl --user-unit freellmapi.service | grep '\[config\] applied' | tail -1
 custom:<model_id>#<baseUrl>     # pinned to ONE relay — always use this form
 ```
 
-E.g. `custom:glm-5.3-flash#https://api.voidai.app/v1`. The bare
-`custom:<model_id>` (no `#endpoint`) is ambiguous once two relays serve the same
-id. See [Pinning one provider's copy](#pinning-one-providers-copy-of-a-model).
+### Custom-endpoint gotchas
 
-### Gotchas
-
-- Relay URIs get mis-pasted: an auth `401 invalid_key` at the given URL with a
-  key named after another domain means try the domain the key implies
-  (`sk-cheap-…` → `cheapllm.shop`), flagged to the operator.
-- Some relays are account-gated per feature, per plan: VoidAI free required a
-  linked Discord for any inference (`free_credit_verification_required`) and
-  disabled vision outright (`vision_disabled_free_plan`). A gate is an operator
-  action at the provider's dashboard, not a proxy fault — probe, report, retry.
-- Deleting a custom model row via `DELETE /api/models/<id>` also removes the
-  endpoint's key when no rows use it (`deleteUnusedCustomEndpointKey`) —
-  deleting the last model of an endpoint drops the key too.
+- A `401 invalid_key` at the given URI usually means a mis-pasted URI — try the
+  domain the key name implies and confirm the real base URL with the operator.
+- Free tiers can gate features per plan (`free_credit_verification_required`
+  for all inference, `vision_disabled_free_plan` for image input). A gate is an
+  operator action at the provider's dashboard, not a proxy fault — probe,
+  report, retry.
+- Some relays enforce a per-message cooldown (e.g. 7s) — set `rpmLimit`
+  accordingly (60/cooldown-seconds, floored to int).
+- `DELETE /api/models/<id>` on a custom row also removes the endpoint's key
+  when no rows use it (`deleteUnusedCustomEndpointKey`) — deleting the last
+  model of an endpoint drops the key too.
 
 ## Deleting a model
 
-Deleting a model removes the row **and writes a tombstone**, so the next catalog
-sync cannot resurrect it. This is different from disabling:
+Deleting removes the row **and writes a tombstone**, so catalog sync cannot
+resurrect it:
 
 | Action | `/v1/models` | Routing |
 |---|---|---|
 | Disable (`enabled: false`) | Still listed, tagged `available: false` | Stopped |
 | Delete | **Gone from the list** | Gone |
 
-Do NOT delete by writing to the DB by hand — bypassing the API skips the
-tombstone and cleanup side effects; the row would simply return on the next
-catalog sync. Instead:
+Do not delete by writing to the DB by hand — that skips the tombstone and
+cleanup side effects, and the row returns on the next catalog sync.
 
-1. **Get a dashboard token.** The proxy key (`freellmapi-…`) only authorizes
-   `/v1/*`; the dashboard/admin API needs a session token from browser login.
-2. **Find the row's integer id** (one row per provider per model — a model served
-   by three relays has three rows; deleting one leaves the others):
+1. **Dashboard token** (the proxy key does not authorize `/api/*`).
+2. **Find the row's integer id** (one row per provider per model):
 
    ```bash
    curl -s -H "Authorization: Bearer <dashboard token>" \
@@ -513,12 +417,12 @@ catalog sync. Instead:
      node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{for(const r of JSON.parse(d)) console.log(r.id, r.platform, r.modelId)})'
    ```
 
-3. **Delete by id** (also use it per-id for every provider copy you want gone):
+3. **Delete by id** (per id for every provider copy being removed):
 
    ```bash
    curl -s -X DELETE -H "Authorization: Bearer <dashboard token>" \
      http://192.168.0.2:3001/api/models/<id>
-   # → {"success":true,...}; a second call returns 404 once the row is gone
+   # → {"success":true,...}; a second call returns 404
    ```
 
 4. **Verify:**
@@ -531,49 +435,31 @@ catalog sync. Instead:
    console.table(db.prepare("SELECT kind,platform,model_id,source FROM catalog_model_tombstones ORDER BY created_at DESC LIMIT 5").all());'
    ```
 
-Deletion inside the route (`server/src/routes/models.ts`, `modelsRouter.delete('/:id')`)
-records a `catalog_model_tombstones` row with `source='user'`, clears
-`profile_models`/`fallback_config` entries, and deletes the `models` row in one
-transaction. For custom-relay models (`platform='custom'`) it also runs
-`deleteUnusedCustomEndpointKey`. Upstream EOL retirements use
-`source='upstream_eol'` instead and keep the row disabled; those can be
-reinstated by a later catalog, a user tombstone cannot (only by re-adding the
-model).
+Deletion (`server/src/routes/models.ts`, `modelsRouter.delete('/:id')`) records
+a `catalog_model_tombstones` row with `source='user'`, clears
+`profile_models`/`fallback_config`, and deletes the `models` row in one
+transaction. Upstream EOL retirements use `source='upstream_eol'` instead and
+keep the row disabled; a later catalog can reinstate those, a user tombstone
+cannot (only re-adding the model).
 
 ## Gotchas
 
-- **Deleting a unified-group member affects the group.** With unify ON,
-  `/v1/models` shows one entry per logical model; deleting a member row drops
-  that provider copy (merge membership, fallback and profile state) but not the
-  other providers' rows.
-- **Deletions survive restarts and catalog syncs** — a deleted model has a
-  `source='user'` tombstone that catalog sync honors permanently. The only thing
-  that clears the tombstone is *declaring the model again* in
-  `freellmapi.config.json` (`declarative-config.ts`, `upsertModel()` — a
-  declaration is treated as operator intent to restore). So on restart, only
-  models actually declared in the config reappear; never delete a model that is
-  still declared there without first removing its declarative entry. (The file
-  cannot be used to delete; it only adds or edits.)
-
-- **`ENCRYPTION_KEY` must stay stable.** Provider keys are encrypted at rest with
-  it; changing it breaks every stored secret. It lives in `.env` (mode `600`).
-- **No hot reload** — always restart the service after editing the config.
-- **Do not rebuild for config-only changes.** `freellmapi.config.json` and
-  `.env` are read at runtime. A `npm run build` is only needed after editing
-  TypeScript under `server/`, `client/`, `shared/` or `cli/`.
+- **Deleting a unified-group member affects the group.** Deleting a member row
+  drops that provider copy (merge membership, fallback, profile state) but not
+  the other providers' rows.
+- **Deletions survive restarts and catalog syncs.** Only declaring the model
+  again in `freellmapi.config.json` clears the tombstone (`upsertModel()` — a
+  declaration is operator intent to restore). The config file can only add or
+  edit, never delete: remove the declarative entry *before* deleting a model.
+- **`ENCRYPTION_KEY` must stay stable.** Provider keys are encrypted at rest
+  with it; changing it breaks every stored secret. Lives in `.env` (mode 600).
+- **No hot reload** — restart after editing the config.
+- **No rebuild for config-only changes.** `npm run build` is only needed after
+  editing TypeScript under `server/`, `client/`, `shared/`, or `cli/`.
 - **Binding:** the server listens on `HOST` from `.env` (currently
-  `192.168.0.2`), not loopback, so the first-run setup code is required from any
-  browser. Find it with
+  `192.168.0.2`), not loopback. First-run setup code:
   `journalctl --user-unit freellmapi.service | grep 'setup code' | tail -1`.
-- **OrcaRouter free models are account-gated.** A 429 saying "Free models are
-  not available to this account yet … link a GitHub account" means the key's
-  account isn't entitled yet (new GitHub accounts don't qualify until they age),
-  not a proxy fault. Free routes never fall back to paid models, so a 429 there
-  is a clean quota signal.
-
-## Current additions
-
-The authoritative list of models this install adds or edits — their platforms,
-ids, and metadata — is `freellmapi.config.json` (the `models` array). Read that
-file rather than a snapshot here; it is the source of truth and this document is
-not kept in sync with it.
+- **Free-route 429s / account gates are quota signals, not faults.** A 429
+  telling you to link an account means the key's account isn't entitled yet —
+  fix at the provider's dashboard. Free routes never fall back to paid models,
+  so a 429 there is a clean quota signal.
