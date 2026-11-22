@@ -175,6 +175,25 @@ though NVIDIA also serves a `z-ai/glm-5.3-flash` copy that the bare
 This works only when unify is enabled. For `custom` relays that share a model id,
 append an endpoint instead: `custom:model_id#<endpoint-handle-or-url>`.
 
+**How the unified routing key is derived** (`server/src/services/model-groups.ts`,
+`normalizeGroupKey`): from the row's **displayName**, not the model id. The
+provider suffix `" (…)"` is stripped (`stripProviderSuffix`), then the name is
+lowercased with whitespace/hyphens/underscores collapsed — so `GLM 5.3 Flash
+(NV)`, `GLM-5.3 Flash (APINex Free)` and `GLM 5.3 Flash (AxForge)` all group
+under the one key `glm-5.3-flash`. Consequences worth knowing:
+
+- **Renaming a model's displayName moves it between groups.** Dropping `1017`
+  from `DeepSeek V4.1 Flash 1017 (CheapLLM)` folded it into the
+  `deepseek-v4.1-flash` group; the old `deepseek-v4.1-flash-1017` slug
+  disappears from `/v1/models`.
+- Two rows with the same stripped name but **no** `" (…)"` suffix still share
+  the group — the suffix is cosmetic for grouping. Keep it anyway (it is what
+  makes rows distinguishable on the dashboard), unless the goal is exactly a
+  shared label like the two `Deepseek V4.1 Flash` relays.
+- Genuine variants with different stripped names (`Llama 3.3 70B fp8-fast` vs
+  `Llama 3.3 70B`) stay separate by design; only an operator override
+  (`PUT /api/settings/unify` `merges`) can join them.
+
 ## Providers that need a key
 
 Adding a model does **not** add credentials. NVIDIA NIM (and most providers)
